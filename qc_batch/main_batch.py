@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""
+main_batch.py
+
+Ejecutor principal del sistema de QC en lote.
+Escanea la carpeta de entrada en busca de archivos *_org.csv,
+pregunta qué hacer si existen versiones TMP o QC,
+y llama al workflow para procesar cada archivo.
+
+Menú igual al estilo clásico del código original:
+
+  (s) Omitir y marcar como COMPLETADO
+  (n) Revisar nuevamente desde cero
+  (p) Posponer — omitir solo en esta ejecución
+  (r) Reanudar desde versión temporal (TMP)
+
+"""
+
+import argparse
+import os
+from pathlib import Path
+import re
+from qc_batch.io_manager import parse_filename, build_filename
+from qc_batch.workflow import process_file
+
+
+# ---------------------------------------------------------------------
+# Buscar archivos *_org.csv en la carpeta de entrada
+# ---------------------------------------------------------------------
+def buscar_archivos_org(folder_in: str):
+    folder = Path(folder_in)
+    archivos = []
+    # Buscar archivos con _org.csv pero también aceptar archivos sin sufijo
+    for f in sorted(folder.glob("*.csv")):
+        info = parse_filename(f.name)
+        if info is None:
+            continue
+        # aceptar solo aquellos que son ORG o que no tienen suffix (compatibilidad)
+        if info.get("suffix") and info.get("suffix").lower() != "org":
+            continue
+        archivos.append(
+            {
+                "path": f,
+                "var": info["var"],
+                "periodo": info["periodo"],
+                "estacion": info["estacion"],
+            }
+        )
+    return archivos
+
+
+# ---------------------------------------------------------------------
+# Menú
+# ---------------------------------------------------------------------
+def menu_interactivo(archivo, existe_tmp, existe_qc):
+    """
+    Menú interactivo mejorado para archivos con QC o TMP previos.
+    Compatible con flujos QC y TMP.
+    """
+
+    print("\n===========================================")
+    print(f"📄 Procesando archivo: {archivo}")
+    print("===========================================\n")
+
+    # ------------------------------------------------------------------
+    # CASO 1: Existe una versión QC definitiva previa
+    # ------------------------------------------------------------------
+    if existe_qc:
+        print("⚠️  Se encontró una versión **QC** previa para este archivo.\n")
+
+        print("Opciones disponibles:")
+        print("   (v) 👀 Ver el archivo QC")
+        print("       → Abre el QC para inspección antes de tomar una decisión.\n")
+
+        print("   (r) 🔁 Revisar nuevamente desde cero")
+        print("       → Ignora el QC previo y vuelve a cargar la versión ORG.\n")
+
+        print("   (s) ✔  Mantener QC como definitivo y omitir")
+        print("       → El QC previo se considera válido.\n")
+
+        print("   (p) ⏭  Posponer solo esta ejecución\n")
+
+        while True:
+            resp = input("Seleccione una opción: ").strip().lower()
+
+            if resp == "v":
+                print(f"\n👀 Mostrando QC: {archivo.replace('_org','_QC')}\n")
+                # Mostrar QC (solo mostrar un fragmento)
+                try:
+                    path_qc = archivo.replace("_org.csv", "_QC.csv")
+                    df = pd.read_csv(path_qc)
+                    print(df.head())
+                except:
+                    print("⚠️ No se pudo mostrar el QC.\n")
+                continue  # volver a mostrar menú para decidir
+
+            elif resp in ("r", "s", "p"):
+                return resp
+
+            print("❌ Opción inválida.\n")
+
+    # ------------------------------------------------------------------
+    # CASO 2: Existe TMP pero NO QC
+    # ------------------------------------------------------------------
+    if existe_tmp and not existe_qc:
+        print("⚠️  Se encontró una versión **TEMPORAL (TMP)** para este archivo.\n")
+
+        print("Opciones disponibles:")
+        print("   (r) 🔄 Reanudar desde la versión TMP")
+        print("       → Continúa desde donde quedó el proceso.\n")
+
+        print("   (n) 🧹 Revisar nuevamente desde cero")
+        print("       → Elimina TMP y carga la versión ORG.\n")
+
+        print("   (s) ✔  Marcar como COMPLETADO y omitir")
+        print("       → Solo si ya revisó manualmente y está correcto.\n")
+
+        print("   (p) ⏭  Posponer solo esta ejecución\n")
+
+        while True:
+            resp = input("Seleccione una opción: ").strip().lower()
+
+            if resp in ("r", "n", "s", "p"):
+                return resp
+
+            print("❌ Opción inválida.\n")
+
+    # ------------------------------------------------------------------
+    # CASO 3: No existía QC ni TMP → ORG limpio
+    # ------------------------------------------------------------------
+    return "n"
+
+
+# ---------------------------------------------------------------------
+# Ejecución principal por archivo
+# ---------------------------------------------------------------------
+def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k):
+    var = entry["var"]
+    periodo = entry["periodo"]
+    estacion = entry["estacion"]
+
+    # Detectar si existen tmp o qc
+    fname_tmp = build_filename(var, periodo, estacion, "tmp")
+    fname_qc = build_filename(var, periodo, estacion, "qc")
+
+    existe_tmp = Path(folder_out, fname_tmp).exists()
+    existe_qc = Path(folder_out, fname_qc).exists()
+
+    # Mostrar menú clásico y pedir acción
+    accion = menu_interactivo(
+        archivo=entry["path"].name, existe_tmp=existe_tmp, existe_qc=existe_qc
+    )
+
+    # Procesar según acción
+    if accion == "s":
+        # marcar como completado sin procesar
+        print(f"✔ Marcado como COMPLETADO: {entry['path'].name}\n")
+        return
+
+    if accion == "p":
+        # Omitir solo esta vez
+        print(f"⏭ Omitido en esta ejecución: {entry['path'].name}\n")
+        return
+
+    if accion == "n":
+        # Procesar desde cero: ignorar tmp o qc
+        print(f"🔄 Procesando desde cero: {entry['path'].name}\n")
+        process_file(
+            var=var,
+            periodo=periodo,
+            estacion=estacion,
+            folder_in=folder_in,
+            folder_out=folder_out,
+            lower_p=lower_p,
+            upper_p=upper_p,
+            k=k,
+            ventana=ventana,
+            ask_user=input,
+        )
+        return
+
+    if accion == "r":
+        # Reanudar desde tmp
+        if existe_tmp:
+            print(f"🔁 Reanudando desde TMP: {entry['path'].name}\n")
+        else:
+            print("⚠️ No existe TMP, procesando desde cero.\n")
+
+        process_file(
+            var=var,
+            periodo=periodo,
+            estacion=estacion,
+            folder_in=folder_in,
+            folder_out=folder_out,
+            lower_p=lower_p,
+            upper_p=upper_p,
+            k=k,
+            ventana=ventana,
+            ask_user=input,
+        )
+        return
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(
+        description="Ejecutor en lote del control de calidad de series climáticas."
+    )
+
+    parser.add_argument(
+        "-i", "--input", required=True, help="Carpeta de entrada que contiene *_org.csv"
+    )
+
+    parser.add_argument(
+        "-o", "--output", required=True, help="Carpeta de salida para guardar tmp y qc"
+    )
+
+    parser.add_argument(
+        "--ventana",
+        type=int,
+        default=7,
+        help="Días hacia atrás y adelante para la gráfica de contexto (default: 7)",
+    )
+
+    parser.add_argument(
+        "--lower-p",
+        type=float,
+        default=0.1,
+        help="Percentil inferior para control estadístico (default: 0.1)",
+    )
+
+    parser.add_argument(
+        "--upper-p",
+        type=float,
+        default=0.9,
+        help="Percentil superior para control estadístico (default: 0.9)",
+    )
+
+    parser.add_argument(
+        "-k", type=float, default=1.5, help="Multiplicador del IQR (default: 1.5)"
+    )
+
+    args = parser.parse_args()
+
+    folder_in = args.input
+    folder_out = args.output
+    ventana = args.ventana
+
+    lower_p = args.lower_p
+    upper_p = args.upper_p
+    k = args.k
+
+    # Buscar archivos ORG
+    entradas = buscar_archivos_org(folder_in)
+
+    if not entradas:
+        print("❌ No se encontraron archivos *_org.csv en la carpeta de entrada.")
+        return
+
+    print(f"\n🔍 Detectados {len(entradas)} archivos para procesar.\n")
+
+    # Procesar cada archivo
+    for entry in entradas:
+        var = entry["var"].lower()
+
+        # OMITIR variables no térmicas
+        if var not in ("tmin", "tmean", "tmax"):
+            print(f"⏭ Omitiendo variable no térmica: {var}")
+            continue
+        procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
+
+
+if __name__ == "__main__":
+    main()

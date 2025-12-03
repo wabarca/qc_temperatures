@@ -190,16 +190,9 @@ def mostrar_grafica_contexto(
 
     archivos = os.listdir(folder_in)
     archivos_lower = [a.lower() for a in archivos]
-    var_paths = {}
-    for var in todas:
-        pattern_start = f"{var.lower()}_"
-        pattern_end = f"_{estacion.lower()}.csv"
-        matched = None
-        for a, a_low in zip(archivos, archivos_lower):
-            if a_low.startswith(pattern_start) and a_low.endswith(pattern_end):
-                matched = os.path.join(folder_in, a)
-                break
-        var_paths[var] = matched
+    var_paths = {
+        var: _find_file_for_var(folder_in, var, estacion, folder_out) for var in todas
+    }
 
     def cargar_y_filtrar(path):
         if not path or not os.path.exists(path):
@@ -469,18 +462,37 @@ def graficar_comparativa(
 # ---------------------------------------------------------------------
 
 
-def _find_file_for_var(folder_in, var, estacion):
+def _find_file_for_var(folder_in, var, estacion, folder_out=None):
     """
-    Busca el archivo correspondiente a una variable (tmin, ts, tmax)
-    en la carpeta de entrada para la estación dada.
+    Busca archivo para una variable (ts, tmax, tmin).
+    Regla:
+      1) Si existe *_QC.csv en folder_out → usar ese
+      2) Si existe versión NO-QC en folder_out → usar ese
+      3) Si no existe, usar archivo original (folder_in)
     """
-    archivos = os.listdir(folder_in)
+
     var = var.lower()
     estacion = estacion.lower()
-    for a in archivos:
-        a_low = a.lower()
-        if a_low.startswith(f"{var}_") and a_low.endswith(f"_{estacion}.csv"):
-            return os.path.join(folder_in, a)
+
+    # 1️⃣ Buscar primero versiones QC en carpeta de salida
+    if folder_out:
+        for fname in os.listdir(folder_out):
+            f = fname.lower()
+            if f.startswith(f"{var}_") and f.endswith(f"_{estacion}_qc.csv"):
+                return os.path.join(folder_out, fname)
+
+        # 2️⃣ Buscar versiones NO-QC en carpeta de salida
+        for fname in os.listdir(folder_out):
+            f = fname.lower()
+            if f.startswith(f"{var}_") and f.endswith(f"_{estacion}.csv"):
+                return os.path.join(folder_out, fname)
+
+    # 3️⃣ Buscar original en carpeta de entrada
+    for fname in os.listdir(folder_in):
+        f = fname.lower()
+        if f.startswith(f"{var}_") and f.endswith(f"_{estacion}.csv"):
+            return os.path.join(folder_in, fname)
+
     return None
 
 
@@ -489,7 +501,8 @@ def _save_df_as_qc(df, ruta_original, folder_out):
     Guarda el DataFrame en la carpeta de salida con sufijo _QC.csv.
     """
     base_name = os.path.basename(ruta_original)
-    salida_name = base_name.replace(".csv", "_QC.csv")
+    clean = base_name.replace("_QC", "").replace(".csv", "")
+    salida_name = f"{clean}_QC.csv"
     ruta_salida = os.path.join(folder_out, salida_name)
     df_out = df.copy()
     if isinstance(df_out.iloc[0, 0], pd.Timestamp):
@@ -503,7 +516,7 @@ def _save_df_as_qc(df, ruta_original, folder_out):
 # ---------------------------------------------------------------------
 
 
-def verificar_inconsistencias_termicas(folder_in, estacion):
+def verificar_inconsistencias_termicas(folder_in, folder_out, estacion):
     """
     Recorre los registros de tmin, ts y tmax para la estación dada
     y detecta días donde no se cumpla tmin < ts < tmax.
@@ -512,7 +525,8 @@ def verificar_inconsistencias_termicas(folder_in, estacion):
         {'fecha': ..., 'tmin': ..., 'ts': ..., 'tmax': ..., 'inconsistente': True}
     """
     rutas = {
-        v: _find_file_for_var(folder_in, v, estacion) for v in ["tmin", "ts", "tmax"]
+        v: _find_file_for_var(folder_in, v, estacion, folder_out)
+        for v in ["tmin", "ts", "tmax"]
     }
     dfs = {}
     for v, ruta in rutas.items():
@@ -613,7 +627,7 @@ def aplicar_correccion_termica_interactiva(
     # Mostrar contexto gráfico
     try:
         # Buscar archivo real de la variable ts para esta estación
-        ruta_ts = _find_file_for_var(folder_in, "ts", estacion)
+        ruta_ts = _find_file_for_var(folder_in, "ts", estacion, folder_out)
         if ruta_ts and os.path.exists(ruta_ts):
             df_ts = pd.read_csv(ruta_ts, sep=None, engine="python")
             df_ts.columns = [c.strip() for c in df_ts.columns]
@@ -672,7 +686,8 @@ def aplicar_correccion_termica_interactiva(
 
     # Cargar dataframes de cada variable
     rutas = {
-        v: _find_file_for_var(folder_in, v, estacion) for v in ["tmin", "ts", "tmax"]
+        v: _find_file_for_var(folder_in, v, estacion, folder_out)
+        for v in ["tmin", "ts", "tmax"]
     }
     dfs = {}
     for v, ruta in rutas.items():
@@ -693,19 +708,18 @@ def aplicar_correccion_termica_interactiva(
         if d is None or ruta is None:
             return
         mask = d[d.columns[0]] == fecha_obj
+        # No modificar si esta serie está completada
+        completed = load_completed(folder_out)
+        base_name = os.path.basename(ruta)
+
+        if base_name in completed["completadas"]:
+            print(f"⛔ {base_name} está marcado como COMPLETADO. No se modificará.")
+            return
+
         if mask.any():
             val_old = float(d.loc[mask, d.columns[1]].values[0])
             d.loc[mask, d.columns[1]] = nuevo_val
             _save_df_as_qc(d, ruta, folder_out)
-            register_single_change(
-                folder_out,
-                os.path.basename(ruta),
-                fecha_str,
-                val_old,
-                float(nuevo_val),
-                motivo,
-            )
-            print(f"  {var}: {val_old} → {nuevo_val}  ({motivo})")
 
     # Ejecutar acción
     accion = ""
@@ -844,7 +858,20 @@ def procesar_archivo_interactivo(
     5️⃣ Generación de gráficas comparativas y de contexto.
     """
     # --- lectura y validación del archivo ---
-    df = pd.read_csv(ruta_input, sep=None, engine="python")
+    # Determinar variable y estación
+    nombre_archivo = os.path.basename(ruta_input)
+    variable_principal = nombre_archivo.split("_")[0].lower()
+    estacion = nombre_archivo.split("_")[-1].replace(".csv", "")
+
+    # Buscar la versión más reciente (QC si existe)
+    ruta_qc_actual = _find_file_for_var(
+        os.path.dirname(ruta_input), variable_principal, estacion, ruta_output
+    )
+
+    ruta_a_usar = ruta_qc_actual if ruta_qc_actual else ruta_input
+
+    df = pd.read_csv(ruta_a_usar, sep=None, engine="python")
+
     df.columns = [c.strip() for c in df.columns]
     if len(df.columns) < 2:
         raise ValueError(f"El archivo {ruta_input} no tiene al menos 2 columnas.")
@@ -877,6 +904,22 @@ def procesar_archivo_interactivo(
     # conservar copia original para graficar comparativo luego
     df_original = df.copy()
 
+    # Esta pregunta adicional solo se hace si aplicar_previos==False
+    if not aplicar_previos:
+        cambios_previos = load_changes(ruta_output)
+        if cambios_previos["single_changes"] or cambios_previos["swaps"]:
+            aplicar2 = (
+                input(
+                    "Existen cambios previos registrados en el JSON. ¿Desea aplicarlos a esta serie antes de revisar? (s/n): "
+                )
+                .strip()
+                .lower()
+            )
+            if aplicar2 in ("s", "y"):
+                df = apply_pending_changes_to_df(
+                    ruta_output, os.path.basename(ruta_input), df, fecha_col, val_col
+                )
+
     # determinar estación y variable
     nombre_archivo = os.path.basename(ruta_input)
     estacion = nombre_archivo.split("_")[-1].replace(".csv", "")
@@ -889,8 +932,9 @@ def procesar_archivo_interactivo(
     # -----------------------------------------------------------------
     if variable_principal in ("tmin", "ts", "tmax"):
         inconsistencias = verificar_inconsistencias_termicas(
-            os.path.dirname(ruta_input), estacion
+            os.path.dirname(ruta_input), ruta_output, estacion
         )
+
         if inconsistencias:
             print(
                 f"\n🌡️ Se detectaron {len(inconsistencias)} posibles inconsistencias térmicas en {estacion}."
@@ -1049,7 +1093,7 @@ def procesar_archivo_interactivo(
                 fecha_obj = df.at[idx, fecha_col]
                 folder_in = os.path.dirname(ruta_input)
                 archivo_aux = _find_file_for_var(
-                    folder_in, variable_principal, estacion_comp
+                    folder_in, variable_principal, estacion_comp, folder_out
                 )
                 if not archivo_aux:
                     print(
@@ -1116,7 +1160,7 @@ def procesar_archivo_interactivo(
             if resp == "i" and variable_principal in ("tmax", "tmin"):
                 pareja = "tmin" if variable_principal == "tmax" else "tmax"
                 archivo_pareja = _find_file_for_var(
-                    os.path.dirname(ruta_input), pareja, estacion
+                    os.path.dirname(ruta_input), pareja, estacion, folder_out
                 )
                 if not archivo_pareja:
                     print(f"⚠️ No se encontró el archivo pareja: {pareja}")
@@ -1281,6 +1325,7 @@ def main_batch(folder_in, folder_out):
                 print(f"⏩ Archivo {archivo} ya revisado completamente. Se omite.")
                 continue
 
+            aplicar_cambios_json_previos = False
             if ya_existe:
                 print(f"\n⚠️ Se encontró una versión QC previa para: {archivo}")
                 while True:

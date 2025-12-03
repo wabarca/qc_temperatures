@@ -1,3 +1,9 @@
 *.txt
 __pycache__/
 *bak*
+tests/
+data/
+qc_batch_temperatures.bak.1.py
+qc_batch_temperatures.bak.2.py
+qc_batch_temperature.py
+run_test_workflow.py
