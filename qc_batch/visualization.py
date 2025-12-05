@@ -10,6 +10,102 @@ import pandas as pd
 from pathlib import Path
 import matplotlib as mpl
 
+# ===== SOPORTE MULTI-MONITOR (Windows) =====
+try:
+    import win32gui
+    from screeninfo import get_monitors
+except ImportError:
+    win32gui = None
+    get_monitors = None
+
+# ======================================================
+# DETECCIÓN DE MONITOR Y REUBICACIÓN DE FIGURA
+# ======================================================
+
+
+def detectar_monitor_activo():
+    """
+    Devuelve (indice_monitor, objeto_monitor) donde está la ventana activa (VSCode).
+    Si no es posible detectar, devuelve (None, None).
+    """
+    if win32gui is None or get_monitors is None:
+        return None, None
+
+    try:
+        hwnd = win32gui.GetForegroundWindow()
+        rect = win32gui.GetWindowRect(hwnd)
+        x_centro = (rect[0] + rect[2]) // 2
+        y_centro = (rect[1] + rect[3]) // 2
+
+        monitores = get_monitors()
+
+        for i, m in enumerate(monitores):
+            if (m.x <= x_centro <= m.x + m.width) and (
+                m.y <= y_centro <= m.y + m.height
+            ):
+                return i, m
+    except:
+        pass
+
+    return None, None
+
+
+def obtener_monitor_opuesto():
+    """
+    Devuelve el monitor opuesto al que actualmente contiene VSCode.
+    """
+    if get_monitors is None:
+        return None
+
+    idx, _ = detectar_monitor_activo()
+    monitores = get_monitors()
+
+    if idx is None or not monitores:
+        return None
+
+    # Si solo hay un monitor → no hacemos nada
+    if len(monitores) == 1:
+        return None
+
+    # Si hay 2 → devolver el otro
+    if len(monitores) == 2:
+        return monitores[1 - idx]
+
+    # Si hay más → elegir el primero que no sea el actual
+    for i, m in enumerate(monitores):
+        if i != idx:
+            return m
+
+    return None
+
+
+def mover_figura_a_monitor_opuesto(manager):
+    """
+    Mueve la ventana de Matplotlib al monitor opuesto al de la terminal/VSCode.
+    """
+    monitor = obtener_monitor_opuesto()
+    if monitor is None:
+        return
+
+    # Colocar ventana un poco dentro del monitor
+    x = monitor.x + 100
+    y = monitor.y + 100
+
+    # Para backend TkAgg
+    try:
+        manager.window.wm_geometry(f"+{x}+{y}")
+        return
+    except:
+        pass
+
+    # Para backend Qt5Agg
+    try:
+        manager.window.move(x, y)
+        return
+    except:
+        pass
+
+
 # ======================================================
 # ESTILO GLOBAL MODERNO
 # ======================================================
@@ -250,6 +346,12 @@ def plot_context_2x2(
         fig.savefig(outdir / fname, dpi=140, bbox_inches="tight")
 
     if show:
+        try:
+            manager = plt.get_current_fig_manager()
+            mover_figura_a_monitor_opuesto(manager)
+        except:
+            pass
+
         plt.show(block=False)
 
     return fig
@@ -352,6 +454,13 @@ def plot_comparison_qc(df_org, df_qc, var, periodo, estacion, folder_out):
     fname = f"{var}_{periodo}_{estacion.upper()}_comparacion.png"
     fig.savefig(outdir / fname, dpi=140, bbox_inches="tight")
 
+    try:
+        manager = plt.get_current_fig_manager()
+        mover_figura_a_monitor_opuesto(manager)
+    except:
+        pass
+
+    plt.show(block=False)
     plt.close(fig)
     return str(outdir / fname)
 
