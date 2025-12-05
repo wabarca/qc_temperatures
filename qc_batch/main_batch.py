@@ -22,6 +22,7 @@ from pathlib import Path
 import re
 from qc_batch.io_manager import parse_filename, build_filename
 from qc_batch.workflow import process_file
+import pandas as pd
 
 
 # ---------------------------------------------------------------------
@@ -52,7 +53,7 @@ def buscar_archivos_org(folder_in: str):
 # ---------------------------------------------------------------------
 # Menú
 # ---------------------------------------------------------------------
-def menu_interactivo(archivo, existe_tmp, existe_qc):
+def menu_interactivo(archivo, existe_tmp, existe_qc, folder_out):
     """
     Menú interactivo mejorado para archivos con QC o TMP previos.
     Compatible con flujos QC y TMP.
@@ -69,8 +70,16 @@ def menu_interactivo(archivo, existe_tmp, existe_qc):
         print("⚠️  Se encontró una versión **QC** previa para este archivo.\n")
 
         print("Opciones disponibles:")
-        print("   (v) 👀 Ver el archivo QC")
-        print("       → Abre el QC para inspección antes de tomar una decisión.\n")
+        print("   (v) 👀 Ver el archivo QC (muestra tabla y gráfica comparativa)")
+        print("       → Inspeccionar antes de tomar una decisión.\n")
+
+        print("   (a) 🔎 Auditar QC (térmico + estadístico)")
+        print("       → Revisa el QC sin modificarlo y muestra un informe.\n")
+
+        print("   (p) 🛠 Revisar QC parcialmente (corregir inconsistencias existentes)")
+        print(
+            "       → Cargar el QC y permitir correcciones puntuales (no desde cero).\n"
+        )
 
         print("   (r) 🔁 Revisar nuevamente desde cero")
         print("       → Ignora el QC previo y vuelve a cargar la versión ORG.\n")
@@ -78,23 +87,44 @@ def menu_interactivo(archivo, existe_tmp, existe_qc):
         print("   (s) ✔  Mantener QC como definitivo y omitir")
         print("       → El QC previo se considera válido.\n")
 
-        print("   (p) ⏭  Posponer solo esta ejecución\n")
-
         while True:
             resp = input("Seleccione una opción: ").strip().lower()
 
             if resp == "v":
-                print(f"\n👀 Mostrando QC: {archivo.replace('_org','_QC')}\n")
-                # Mostrar QC (solo mostrar un fragmento)
+                # Mostrar QC (tabla parcial) y también intentar mostrar la gráfica comparativa
                 try:
-                    path_qc = archivo.replace("_org.csv", "_QC.csv")
+                    path_qc = Path(folder_out) / archivo.replace("_org.csv", "_QC.csv")
                     df = pd.read_csv(path_qc)
                     print(df.head())
                 except:
-                    print("⚠️ No se pudo mostrar el QC.\n")
+                    print("⚠️ No se pudo mostrar el QC (tabla).\n")
+
+                # Intentar mostrar figura comparativa si existe
+                try:
+                    # la figura se guarda con estacion.upper()
+                    parsed = parse_filename(archivo)
+                    var = parsed["var"]
+                    periodo = parsed["periodo"]
+                    estacion = parsed["estacion"]
+                    fname_png = f"{var}_{periodo}_{estacion.upper()}_comparacion.png"
+                    p = Path(folder_out) / fname_png
+
+                    if p.exists():
+                        print(f"🖼 Mostrando gráfica comparativa: {p.name}")
+                        from qc_batch.visualization import plot_image_preview
+
+                        try:
+                            plot_image_preview(str(p))
+                        except Exception:
+                            pass
+                    else:
+                        print("ℹ️ No se encontró la gráfica comparativa.\n")
+                except Exception:
+                    pass
+
                 continue  # volver a mostrar menú para decidir
 
-            elif resp in ("r", "s", "p"):
+            elif resp in ("a", "p", "r", "s"):
                 return resp
 
             print("❌ Opción inválida.\n")
@@ -148,7 +178,10 @@ def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
 
     # Mostrar menú clásico y pedir acción
     accion = menu_interactivo(
-        archivo=entry["path"].name, existe_tmp=existe_tmp, existe_qc=existe_qc
+        archivo=entry["path"].name,
+        existe_tmp=existe_tmp,
+        existe_qc=existe_qc,
+        folder_out=folder_out,
     )
 
     # Procesar según acción
@@ -158,9 +191,23 @@ def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
         return
 
     if accion == "p":
-        # Omitir solo esta vez
-        print(f"⏭ Omitido en esta ejecución: {entry['path'].name}\n")
-        return
+        # Si existe QC, 'p' quiere decir "Revisar QC parcialmente".
+        if existe_qc:
+            print(f"🛠 Revisando QC parcialmente para: {entry['path'].name}\n")
+            process_file(
+                var=var,
+                periodo=periodo,
+                estacion=estacion,
+                folder_in=folder_in,
+                folder_out=folder_out,
+                start_from="qc",
+                ask_user=input,
+            )
+            return
+        # Si no existe QC (y el menú devolvió 'p' en el caso TMP), posponer
+        else:
+            print(f"⏭ Omitido en esta ejecución: {entry['path'].name}\n")
+            return
 
     if accion == "n":
         # Procesar desde cero: ignorar tmp o qc
@@ -177,6 +224,13 @@ def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
             ventana=ventana,
             ask_user=input,
         )
+        return
+
+    if accion == "a":
+        print("\n🔎 Ejecutando auditoría del QC...\n")
+        from qc_batch.workflow import auditar_qc
+
+        auditar_qc(var, periodo, estacion, folder_in, folder_out)
         return
 
     if accion == "r":

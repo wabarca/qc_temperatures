@@ -112,6 +112,7 @@ def process_file(
     k: float = 1.5,
     ventana: int = 7,
     ask_user=None,
+    start_from: str = "auto",
 ):
     """
     Procesa una variable para una estación específica.
@@ -130,11 +131,16 @@ def process_file(
     status = base_info["status"]
     path_base = base_info["path"]
 
-    if status is None:
+    if status is None and start_from != "qc":
         print(f"No se encontró archivo para {var}_{periodo}_{estacion}")
         return
 
-    print(f"[{var.upper()}] Archivo base detectado: {status.upper()} → {path_base}")
+    if start_from == "qc":
+        status = "qc"
+        path_base = Path(folder_out) / build_filename(var, periodo, estacion, "qc")
+        print(f"[{var.upper()}] Revisión parcial usando QC: {path_base}")
+    else:
+        print(f"[{var.upper()}] Archivo base detectado: {status.upper()} → {path_base}")
 
     # Leer ORG para comparativa final (buscar org o fallback sin sufijo; aceptar alias ts<->tmean)
     path_org = Path(folder_in) / build_filename(var, periodo, estacion, "org")
@@ -175,10 +181,30 @@ def process_file(
         # si no se pudo leer, crear df_org vacío con fechas del df_base si existe
         df_org = None
 
+    # ---------------------------------------------------------------------
+    # Cargar triplete según start_from
+    # ---------------------------------------------------------------------
+    def _load_triplet_from_qc(folder_out, periodo, estacion):
+        res = {}
+        for vname in ("tmin", "tmean", "tmax"):
+            p = Path(folder_out) / build_filename(vname, periodo, estacion, "qc")
+            if p.exists():
+                try:
+                    res[vname] = read_series(str(p))
+                except Exception:
+                    res[vname] = None
+            else:
+                res[vname] = None
+        return res
+
+    if start_from == "qc":
+        dfs_trip = _load_triplet_from_qc(folder_out, periodo, estacion)
+    else:
+        dfs_trip = load_triplet(folder_in, folder_out, periodo, estacion)
+
     # =========================================================
     #  CONTROL TERMODINÁMICO (BUCLE DINÁMICO CORREGIDO)
     # =========================================================
-    dfs_trip = load_triplet(folder_in, folder_out, periodo, estacion)
 
     # Detectar inconsistencias iniciales
     inconsist = detect_thermal_inconsistencies(
@@ -218,9 +244,25 @@ def process_file(
         if ask_user(
             "¿Desea comparar con otra estación para el mismo día? (s/n): "
         ).strip().lower() in ("s", "y"):
-            compare_with_other_station(
-                var, periodo, estacion, fecha, folder_in, folder_out, ventana, ask_user
-            )
+            # Pedir ID UNA vez y delegar la comparación en modo no-interactivo
+            estacion_comp = ask_user(
+                "Ingrese el ID de la estación (ej. S-12): "
+            ).strip()
+            if estacion_comp:
+                compare_with_other_station(
+                    var,
+                    periodo,
+                    estacion,
+                    fecha,
+                    folder_in,
+                    folder_out,
+                    ventana,
+                    ask_user,
+                    prompt_first=False,
+                    estacion_comp=estacion_comp,
+                )
+            else:
+                print("⚠ Código de estación vacío. Omitiendo comparación.\n")
 
         # -----------------------------------------------------------
         # Merge robusto del triplete (corrige arrastre incorrecto)
@@ -379,15 +421,19 @@ def process_file(
         inconsist = inconsist_new
 
     # Guardar *_tmp.csv
-    write_triplet_tmp(dfs_trip, folder_out, periodo, estacion)
-
+    # Si entramos en modo QC parcial (start_from == "qc") NO escribir tmp (dejamos QC como origen);
+    # si entramos desde 'auto' o normal, sí escribimos tmp.
+    if start_from != "qc":
+        write_triplet_tmp(dfs_trip, folder_out, periodo, estacion)
+    else:
+        # aún así, si hubo modificaciones guardadas, escribir QC final después del bloque estadístico
+        pass
     print("\n===== RESUMEN DE CORRECCIONES TÉRMICAS =====")
     for item in resumen_termico:
         print(f" • {item['fecha']}  →  {item['tipo']}  → acción '{item['accion']}'")
     print("===========================================\n")
 
     # DF base de la variable
-    dfs_trip = load_triplet(folder_in, folder_out, periodo, estacion)
     df_base = dfs_trip[var]
 
     # =========================================================
@@ -491,7 +537,32 @@ def process_file(
                 {"fecha": fecha_str, "valor": val, "accion": action}
             )
 
-            # ✔ Cerrar todas las ventanas abiertas
+        # Registrar decisión estadística en changes_applied.json (para auditoría)
+        try:
+            changes = None
+            from qc_batch.thermo_qc import _load_changes, _save_changes
+
+            changes = _load_changes(folder_out)
+            entry = {
+                "timestamp": pd.Timestamp.now(tz=None).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "estacion": estacion,
+                "fecha": fecha_str,
+                "accion": action,
+                "valor_prev": float(val),
+                "valor_new": (
+                    None
+                    if action == "s"
+                    else (float(nuevo) if action == "n" else float(val))
+                ),
+                "nota": "decisión estadística (workflow)",
+            }
+            changes.setdefault("single_changes", []).append(entry)
+            _save_changes(folder_out, changes)
+        except Exception:
+            # no crítico; seguir sin fallo
+            pass
+
+        # ✔ Cerrar todas las ventanas abiertas
         try:
             plt.close("all")
         except:
@@ -528,3 +599,104 @@ def process_file(
     generar_informe_pdf(folder_out, var, periodo, estacion, df_changes)
 
     print(f"\n🎉 [OK] QC COMPLETADO para {var.upper()} en estación {estacion}.\n")
+
+
+def auditar_qc(
+    var, periodo, estacion, folder_in, folder_out, lower_p=0.1, upper_p=0.9, k=1.5
+):
+    """Audita un archivo QC existente (térmico + estadístico) sin modificarlo.
+    Devuelve un informe dict y permite optar por entrar a corrección parcial llamando a process_file.
+    """
+    # cargar triplete desde QC explícitamente si existe
+    from qc_batch.io_manager import build_filename
+
+    dfs = {}
+    for v in ("tmin", "tmean", "tmax"):
+        p = Path(folder_out) / build_filename(v, periodo, estacion, "qc")
+        if p.exists():
+            try:
+                dfs[v] = read_series(str(p))
+            except Exception:
+                dfs[v] = None
+        else:
+            dfs[v] = None
+
+    # Auditoría térmica
+    inconsistencias = detect_thermal_inconsistencies(
+        dfs.get("tmin"), dfs.get("tmean"), dfs.get("tmax")
+    )
+
+    # Auditoría estadística sobre la variable 'var' (cargar archivo QC de la variable)
+    p_var = Path(folder_out) / build_filename(var, periodo, estacion, "qc")
+    if p_var.exists():
+        df_qc = read_series(str(p_var))
+    else:
+        df_qc = None
+
+    estad_report = {"outliers": [], "kept": [], "bounds": None}
+    if df_qc is not None:
+        serie_valida = df_qc[df_qc["valor"] != -99]["valor"]
+        bounds = compute_bounds(serie_valida, lower_p=lower_p, upper_p=upper_p, k=k)
+        estat = detect_outliers(df_qc, bounds)
+        estad_report["bounds"] = bounds
+        # load changes to detect maintained
+        try:
+            changes = json.loads(
+                Path(folder_out, "changes_applied.json").read_text(encoding="utf-8")
+            )
+            changed_dates = {
+                entry["fecha"]: entry for entry in changes.get("single_changes", [])
+            }
+        except Exception:
+            changed_dates = {}
+
+        for idx, val in estat:
+            fecha = df_qc.loc[idx, "fecha"].strftime("%Y-%m-%d")
+            if fecha in changed_dates:
+                estad_report["kept"].append(
+                    {
+                        "fecha": fecha,
+                        "valor": float(val),
+                        "accion": changed_dates[fecha].get("accion"),
+                    }
+                )
+            else:
+                estad_report["outliers"].append({"fecha": fecha, "valor": float(val)})
+    # Consolidar informe
+    informe = {"termicas": inconsistencias, "estadistico": estad_report}
+    # Mostrar resumen
+    print("\n===== INFORME DE AUDITORÍA =====")
+    print(f'Inconsistencias térmicas encontradas: {len(informe["termicas"]) }')
+    for it in informe["termicas"][:5]:
+        print(f" - {it['fecha'].strftime('%Y-%m-%d')} → {it['tipo']}")
+    print(
+        f"Outliers estadísticos (no validados): {len(informe['estadistico']['outliers'])}"
+    )
+    for o in informe["estadistico"]["outliers"][:5]:
+        print(f" - {o['fecha']} → {o['valor']}")
+    print("===== FIN INFORME =====\n")
+
+    # Ofrecer corregir ahora si hay problemas
+    if informe["termicas"] or informe["estadistico"]["outliers"]:
+        resp = (
+            input("¿Desea corregir estas inconsistencias ahora? (c)orregir / (m)enu: ")
+            .strip()
+            .lower()
+        )
+        if resp == "c":
+            print("Entrando a revisión parcial...")
+            # Call process_file which will load existing QC via load_triplet and allow corrections
+            process_file(
+                var,
+                periodo,
+                estacion,
+                folder_in,
+                folder_out,
+                lower_p=lower_p,
+                upper_p=upper_p,
+                k=k,
+                ventana=7,
+                ask_user=input,
+            )
+    else:
+        print("🎉 QC APROBADO: No se encontraron inconsistencias no validadas.")

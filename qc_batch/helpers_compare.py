@@ -81,52 +81,37 @@ def compare_with_other_station(
     folder_out: str,
     ventana: int,
     ask_user=input,
+    prompt_first: bool = True,
+    estacion_comp: str = None,
 ):
     """
-    Flujo interactivo para comparación con otras estaciones,
-    usando fallback flexible para cualquier período.
+    Flujo interactivo para comparación con otras estaciones.
+
+    - Si prompt_first == True  → comportamiento interactivo clásico.
+    - Si prompt_first == False → workflow ya preguntó y ya proporcionó el ID.
+        En este modo:
+            * NO se vuelve a preguntar si desea comparar
+            * NO se hace la búsqueda inicial de la variable principal (evita doble fallback)
+            * SOLO se cargan datos dentro del loop vars_all (1 vez por variable)
     """
 
     fecha_obj = pd.to_datetime(fecha_obj)
 
-    while True:
-        resp = (
-            ask_user("¿Desea comparar con otra estación para el mismo día? (s/n): ")
-            .strip()
-            .lower()
-        )
-        if resp not in ("s", "y"):
-            return
-
-        estacion_comp = ask_user("Ingrese el ID de la estación (ej. S-12): ").strip()
+    # ======================================================
+    # MODO NO-INTERACTIVO (cuando workflow ya preguntó)
+    # ======================================================
+    if not prompt_first and estacion_comp:
+        estacion_comp = estacion_comp.strip()
         if not estacion_comp:
-            print("⚠ Código vacío.")
-            continue
+            print("⚠ Código de estación vacío.")
+            return None
 
-        # ---------------------------------------
-        # Buscar archivo equivalente con fallback
-        # ---------------------------------------
-        path = find_series_for_station_full_fallback(
-            folder_in, folder_out, var, periodo, estacion_comp
-        )
+        # ----------------------------------------
+        # NO llamar find_series_for_station_full_fallback() aquí
+        # (Evita el doble FALLBACK para TMAX)
+        # ----------------------------------------
 
-        if not path or not Path(path).exists():
-            print(
-                f"⚠ No se encontró archivo para {var.upper()} en estación {estacion_comp}."
-            )
-            continue
-
-        # Cargar serie auxiliar
-        df_aux = read_series(path).copy()
-        df_aux["fecha"] = pd.to_datetime(df_aux["fecha"])
-
-        # Encontrar fecha más cercana
-        idx = (df_aux["fecha"] - fecha_obj).abs().idxmin()
-        fecha_real = df_aux.loc[idx, "fecha"]
-
-        # =====================================================
-        # Cargar TODAS las variables de la estación auxiliar
-        # =====================================================
+        # Cargar todas las variables directamente
         vars_all = ["tmax", "tmean", "tmin", "pr"]
         dfs = {}
 
@@ -145,9 +130,18 @@ def compare_with_other_station(
             else:
                 dfs[v] = None
 
-        # =====================================================
-        # Mostrar comparativa con las 4 variables
-        # =====================================================
+        # Encontrar la fecha equivalente más cercana
+        df_base = dfs.get(var)
+        if df_base is None or df_base.empty:
+            print(
+                f"⚠ No se encontró serie para {var.upper()} en estación {estacion_comp}."
+            )
+            return None
+
+        idx = (df_base["fecha"] - fecha_obj).abs().idxmin()
+        fecha_real = df_base.loc[idx, "fecha"]
+
+        # Mostrar gráfico comparativo
         fig_aux = plot_context_2x2(
             dfs,
             var_principal=var,
@@ -159,8 +153,75 @@ def compare_with_other_station(
         )
 
         print(f"🟢 Comparativa abierta para estación {estacion_comp}.\n")
-
-        # Devolver figura auxiliar para que workflow pueda cerrarla
         return fig_aux
 
-    return None
+    # ======================================================
+    # MODO INTERACTIVO COMPLETO (sin workflow)
+    # ======================================================
+    while True:
+        resp = (
+            ask_user("¿Desea comparar con otra estación para el mismo día? (s/n): ")
+            .strip()
+            .lower()
+        )
+        if resp not in ("s", "y"):
+            return None
+
+        estacion_comp_local = (
+            estacion_comp
+            if estacion_comp
+            else ask_user("Ingrese el ID de la estación (ej. S-12): ").strip()
+        )
+        if not estacion_comp_local:
+            print("⚠ Código vacío.")
+            continue
+
+        # Búsqueda individual inicial (válida SOLO en modo interactivo)
+        path = find_series_for_station_full_fallback(
+            folder_in, folder_out, var, periodo, estacion_comp_local
+        )
+
+        if not path or not Path(path).exists():
+            print(
+                f"⚠ No se encontró archivo para {var.upper()} en estación {estacion_comp_local}."
+            )
+            continue
+
+        # Cargar serie auxiliar base
+        df_aux = read_series(path).copy()
+        df_aux["fecha"] = pd.to_datetime(df_aux["fecha"])
+
+        idx = (df_aux["fecha"] - fecha_obj).abs().idxmin()
+        fecha_real = df_aux.loc[idx, "fecha"]
+
+        # Cargar TODAS las variables
+        vars_all = ["tmax", "tmean", "tmin", "pr"]
+        dfs = {}
+
+        for v in vars_all:
+            path_v = find_series_for_station_full_fallback(
+                folder_in, folder_out, v, periodo, estacion_comp_local
+            )
+            if path_v and Path(path_v).exists():
+                try:
+                    dfv = read_series(path_v).copy()
+                    dfv["fecha"] = pd.to_datetime(dfv["fecha"])
+                    dfs[v] = dfv
+                except Exception as e:
+                    print(f"⚠ Error leyendo {v} de estación {estacion_comp_local}: {e}")
+                    dfs[v] = None
+            else:
+                dfs[v] = None
+
+        fig_aux = plot_context_2x2(
+            dfs,
+            var_principal=var,
+            estacion=estacion_comp_local,
+            fecha_obj=fecha_real,
+            ventana=ventana,
+            folder_out=None,
+            show=True,
+        )
+
+        print(f"🟢 Comparativa abierta para estación {estacion_comp_local}.\n")
+        return fig_aux

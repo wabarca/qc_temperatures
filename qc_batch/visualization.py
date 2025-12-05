@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-visualization.py — Versión corregida y estabilizada
+visualization.py — Versión final modernizada (2025)
 """
 
 import matplotlib.pyplot as plt
@@ -10,18 +10,55 @@ import pandas as pd
 from pathlib import Path
 import matplotlib as mpl
 
-mpl.rcParams["font.family"] = "Calibri"
-mpl.rcParams["font.size"] = 9
-mpl.rcParams["axes.titlesize"] = 12
-mpl.rcParams["axes.labelsize"] = 10
-mpl.rcParams["xtick.labelsize"] = 8
-mpl.rcParams["ytick.labelsize"] = 8
-mpl.rcParams["figure.titlesize"] = 14
-mpl.rcParams["legend.fontsize"] = 8
+# ======================================================
+# ESTILO GLOBAL MODERNO
+# ======================================================
+
+mpl.rcParams.update(
+    {
+        "font.family": "Calibri",
+        "font.size": 10,
+        "axes.titlesize": 13,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "figure.titlesize": 15,
+        "legend.fontsize": 9,
+    }
+)
+
+# Paleta moderna por variable
+COLOR_VAR = {
+    "tmax": "#D62728",  # rojo
+    "tmean": "#7F7F7F",  # gris neutro
+    "tmin": "#1F77B4",  # azul
+    "pr": "#8CB5FF",  # azul claro
+}
+
+# ============================================================
+# PANEL VACÍO
+# ============================================================
+
+
+def _draw_empty_panel(ax):
+    ax.set_facecolor("#FAFAFA")
+    ax.grid(True, linestyle="--", alpha=0.35)
+    for side in ["top", "bottom", "left", "right"]:
+        ax.spines[side].set_visible(True)
+    ax.text(
+        0.5,
+        0.5,
+        "Sin datos",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=11,
+        color="gray",
+    )
 
 
 # ============================================================
-# CONTEXTO 2x2 — TMAX / TMEAN / TMIN / PR
+# CONTEXTO 2×2
 # ============================================================
 
 
@@ -34,15 +71,16 @@ def plot_context_2x2(
     tipo_inconsistencia=None,
     folder_out=None,
     show=True,
+    show_labels=True,
 ):
 
-    var_principal = var_principal.lower()
     fecha_obj = pd.to_datetime(fecha_obj)
+    var_principal = var_principal.lower()
 
     variables = ["tmax", "tmean", "tmin", "pr"]
     unidades = {"tmax": "°C", "tmean": "°C", "tmin": "°C", "pr": "mm"}
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=120)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7), dpi=110)
     axes = axes.flatten()
 
     locator = mdates.DayLocator()
@@ -51,47 +89,41 @@ def plot_context_2x2(
     start = fecha_obj - pd.Timedelta(days=ventana)
     end = fecha_obj + pd.Timedelta(days=ventana)
 
-    # ---------------------------------------------------
-    # Determinar variables afectadas según inconsistencia
-    # ---------------------------------------------------
+    # -----------------------------------
+    # Determinar variables anómalas
+    # -----------------------------------
     vars_anomalas = set()
 
     if tipo_inconsistencia == "estadistico":
-        vars_anomalas = {var_principal}
+        vars_anomalas.add(var_principal)
 
     if tipo_inconsistencia:
-        if "==tmin" in tipo_inconsistencia or tipo_inconsistencia in (
-            "tmean==tmin",
-            "tmin==tmean",
-        ):
-            vars_anomalas.add("tmean")
-            vars_anomalas.add("tmin")
-        if "==tmax" in tipo_inconsistencia or tipo_inconsistencia in (
-            "tmean==tmax",
-            "tmax==tmean",
-        ):
-            vars_anomalas.add("tmean")
-            vars_anomalas.add("tmax")
+        if "==tmin" in tipo_inconsistencia:
+            vars_anomalas |= {"tmean", "tmin"}
+        if "==tmax" in tipo_inconsistencia:
+            vars_anomalas |= {"tmean", "tmax"}
         if tipo_inconsistencia == "tmean>tmax":
-            vars_anomalas.add("tmean")
-            vars_anomalas.add("tmax")
+            vars_anomalas |= {"tmean", "tmax"}
         if tipo_inconsistencia == "tmean<tmin":
-            vars_anomalas.add("tmean")
-            vars_anomalas.add("tmin")
+            vars_anomalas |= {"tmean", "tmin"}
         if tipo_inconsistencia == "tmax<tmin":
-            vars_anomalas.add("tmax")
-            vars_anomalas.add("tmin")
+            vars_anomalas |= {"tmax", "tmin"}
 
-    # fallback: si no detectó nada, usar var_principal
     if not vars_anomalas:
         vars_anomalas.add(var_principal)
 
-    # ----------------------------
+    # -----------------------------------
     # PANEL POR PANEL
-    # ----------------------------
+    # -----------------------------------
     for ax, var in zip(axes, variables):
-        ax.set_title(f"{var.title()} ({unidades[var]})", fontweight="bold")
-        ax.grid(True, linestyle="--", alpha=0.4)
+
+        ax.set_facecolor("#FAFAFA")
+        ax.set_title(f"{var.title()} ({unidades[var]})", fontweight="bold", pad=14)
+        ax.grid(True, linestyle="--", alpha=0.35)
+
+        # Asegurar spines visibles arriba y abajo
+        for side in ["top", "bottom", "left", "right"]:
+            ax.spines[side].set_visible(True)
 
         df = dfs.get(var)
         if df is None or df.empty:
@@ -101,98 +133,122 @@ def plot_context_2x2(
         d = df.copy()
         d["fecha"] = pd.to_datetime(d["fecha"])
         d = d.sort_values("fecha")
-        sub = d[(d["fecha"] >= start) & (d["fecha"] <= end)]
 
+        sub = d[(d["fecha"] >= start) & (d["fecha"] <= end)]
         if sub.empty:
             _draw_empty_panel(ax)
             continue
 
         fechas = sub["fecha"].values
-        vals = sub["valor"].replace(-99, np.nan).astype(float).values
+        valores = sub["valor"].astype(float).values
 
-        if np.all(np.isnan(vals)):
-            _draw_empty_panel(ax)
-            continue
+        # Validos vs faltantes
+        vals = np.where(valores == -99, np.nan, valores)
+        mask_missing = valores == -99
 
-        # Límites
+        # -----------------------------------
+        # Límites de eje Y
+        # -----------------------------------
         if var == "pr":
             vmax = np.nanmax(vals)
-            top_margin = 0.2 * (vmax if vmax > 0 else 1)
-            bottom_margin = -0.15 * (vmax + 1)
-            ax.set_ylim(bottom_margin, vmax + top_margin)
+            ymax = vmax + max(1, 0.15 * vmax)
+            ymin = -0.1 * ymax
+            ax.set_ylim(ymin, ymax)
         else:
             vmin = np.nanmin(vals)
             vmax = np.nanmax(vals)
-            rango = vmax - vmin if vmax > vmin else 1
-            margin = 0.2 * rango
-            ax.set_ylim(vmin - margin, vmax + margin)
+            rango = (vmax - vmin) if vmax > vmin else 1
+            margen = 0.2 * rango
+            ax.set_ylim(vmin - margen, vmax + margen)
 
-        # Gráficas
+        # -----------------------------------
+        # Gráfica
+        # -----------------------------------
+        col = COLOR_VAR[var]
+
         if var == "pr":
-            ax.bar(fechas, np.nan_to_num(vals), width=0.8, color="#3A70E0", alpha=0.6)
-            ax.plot(fechas, np.nan_to_num(vals), "-", color="#3A70E0", lw=1, alpha=0.7)
-            ax.scatter(fechas, np.nan_to_num(vals), color="#3A70E0", s=15, alpha=0.9)
+            ax.bar(fechas, vals, width=0.6, color=col, alpha=0.45)
+            ax.plot(fechas, vals, "-o", markersize=3, color="#5A9FFF", lw=1.0)
         else:
-            ax.plot(fechas, vals, "-o", markersize=5, lw=1.2, color="#3A70E0")
+            ax.plot(fechas, vals, "-o", markersize=3, lw=1.0, color=col)
 
-        # Línea vertical
-        ax.axvline(fecha_obj, color="gray", linestyle="--", linewidth=1)
-
-        # Etiquetas
-        for f, v in zip(fechas, vals):
-            if pd.isna(v):
-                continue
-            yoff = 0.03 * (ax.get_ylim()[1] - ax.get_ylim()[0])
-            text_val = str(v).rstrip("0").rstrip(".")
-            ax.text(
-                f,
-                v + yoff,
-                text_val,
-                ha="center",
-                va="bottom",
-                fontsize=7,
-                color="black",
-                bbox=dict(
-                    facecolor="white",
-                    edgecolor="black",
-                    boxstyle="round,pad=0.2",
-                    alpha=0.55,
-                ),
+        # -----------------------------------
+        # Faltantes -99 como círculos huecos
+        # -----------------------------------
+        if np.any(mask_missing):
+            y_missing = np.full(mask_missing.sum(), ax.get_ylim()[0] + 0.05)
+            ax.scatter(
+                fechas[mask_missing],
+                y_missing,
+                facecolors="none",
+                edgecolors="#D62728",
+                s=30,
+                linewidths=1.3,
+                marker="o",
+                zorder=10,
             )
 
-        # Marcar anómalo
-        mask_fecha = sub["fecha"] == fecha_obj
-        # Marcar valor anómalo SOLO si esta variable está involucrada
-        if var in vars_anomalas and mask_fecha.any():
-            val = sub.loc[mask_fecha, "valor"].values[0]
-            if val != -99 and not pd.isna(val):
-                ax.scatter(
-                    [fecha_obj], [val], s=75, color="red", edgecolor="black", zorder=5
+        # -----------------------------------
+        # Etiquetas numéricas
+        # -----------------------------------
+        if show_labels:
+            yoff = 0.05 * (ax.get_ylim()[1] - ax.get_ylim()[0])
+            for f, v in zip(fechas, vals):
+                if np.isnan(v):
+                    continue
+                txt = str(v).rstrip("0").rstrip(".")
+                ax.text(
+                    f,
+                    v + yoff,
+                    txt,
+                    fontsize=8,
+                    ha="center",
+                    bbox=dict(
+                        facecolor="white",
+                        edgecolor="black",
+                        boxstyle="round,pad=0.2",
+                        alpha=0.55,
+                    ),
                 )
 
+        # -----------------------------------
+        # Anomalía
+        # -----------------------------------
+        mask_fecha = sub["fecha"] == fecha_obj
+        if var in vars_anomalas and mask_fecha.any():
+            v = sub.loc[mask_fecha, "valor"].values[0]
+            if v != -99:
+                ax.scatter(
+                    [fecha_obj],
+                    [v],
+                    s=50,
+                    color="red",
+                    edgecolor="black",
+                    linewidth=1.0,
+                    zorder=12,
+                )
+
+        # Eje X
+        ax.axvline(fecha_obj, color="gray", linestyle="--", linewidth=1)
         ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(formatter)
-        ax.tick_params(axis="x", rotation=45, labelsize=8)
+        ax.tick_params(axis="x", rotation=45)
         ax.set_xlim(start, end)
 
+    fig.subplots_adjust(hspace=0.32)
     fig.suptitle(
-        f"Contexto: anomalía en {var_principal.title()} "
-        f"para {estacion.upper()} el {fecha_obj.strftime('%Y-%m-%d')}",
+        f"Contexto: anomalía en {var_principal.title()} – estación {estacion.upper()} – {fecha_obj:%Y-%m-%d}",
         fontweight="bold",
-        fontsize=14,
     )
+
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
     if folder_out:
         outdir = Path(folder_out) / "fig_contexto"
         outdir.mkdir(exist_ok=True)
-        fname = (
-            f"anomalia_{estacion.upper()}_{var_principal}_"
-            f"{fecha_obj.strftime('%Y%m%d')}.png"
-        )
-        fig.savefig(outdir / fname, dpi=160, bbox_inches="tight")
+        fname = f"anomalia_{estacion.upper()}_{var_principal}_{fecha_obj:%Y%m%d}.png"
+        fig.savefig(outdir / fname, dpi=140, bbox_inches="tight")
 
-    # ❗ Mostrar solo si se pide
     if show:
         plt.show(block=False)
 
@@ -200,82 +256,112 @@ def plot_context_2x2(
 
 
 # ============================================================
-# PANEL VACÍO CONSISTENTE
-# ============================================================
-
-
-def _draw_empty_panel(ax):
-    ax.set_xlim(-1, 1)
-    ax.set_ylim(0, 1)
-    ax.grid(True, linestyle="--", alpha=0.4)
-    ax.text(
-        0.5,
-        0.5,
-        "Sin datos",
-        transform=ax.transAxes,
-        ha="center",
-        va="center",
-        fontsize=10,
-        color="gray",
-    )
-
-
-# ============================================================
-# COMPARACIÓN ORG vs QC (2×1)
+# COMPARACIÓN ORG VS QC
 # ============================================================
 
 
 def plot_comparison_qc(df_org, df_qc, var, periodo, estacion, folder_out):
-    fig, axes = plt.subplots(2, 1, figsize=(12, 7), dpi=120, sharex=True)
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), dpi=110)
 
     df_org = df_org.copy()
     df_qc = df_qc.copy()
-
     df_org["fecha"] = pd.to_datetime(df_org["fecha"])
     df_qc["fecha"] = pd.to_datetime(df_qc["fecha"])
 
     fechas = df_org["fecha"].values
-    vo = df_org["valor"].replace(-99, np.nan).astype(float).values
-    vq = df_qc["valor"].replace(-99, np.nan).astype(float).values
+    vo = df_org["valor"].astype(float).replace(-99, np.nan).values
+    vq = df_qc["valor"].astype(float).replace(-99, np.nan).values
 
     locator = mdates.AutoDateLocator()
     formatter = mdates.ConciseDateFormatter(locator)
 
-    # Panel original
-    axes[0].plot(fechas, vo, "-", lw=0.5, color="blue", label="Original")
-    axes[0].set_title("Serie Original")
-    axes[0].grid(True, linestyle="--", alpha=0.4)
-    axes[0].legend()
+    # -----------------------------
+    # Panel 1: Serie original
+    # -----------------------------
+    ax = axes[0]
+    ax.set_facecolor("#FAFAFA")
+    ax.grid(True, linestyle="--", alpha=0.35)
+    for side in ["top", "bottom", "left", "right"]:
+        ax.spines[side].set_visible(True)
 
-    # Panel corregido
-    axes[1].plot(fechas, vq, "-", lw=0.5, color="blue", label="Corregida")
+    ax.plot(fechas, vo, "-", lw=0.8, color=COLOR_VAR.get(var, "blue"))
+    ax.set_title("Serie Original", pad=14)
 
+    # -----------------------------
+    # Panel 2: Serie corregida
+    # -----------------------------
+    ax2 = axes[1]
+    ax2.set_facecolor("#FAFAFA")
+    ax2.grid(True, linestyle="--", alpha=0.35)
+    for side in ["top", "bottom", "left", "right"]:
+        ax2.spines[side].set_visible(True)
+
+    ax2.plot(fechas, vq, "-", lw=0.8, color=COLOR_VAR.get(var, "blue"))
+
+    # Valores modificados
     mask_mod = ~np.isclose(vo, vq, equal_nan=True)
     if np.any(mask_mod):
-        axes[1].scatter(
+        ax2.scatter(
             fechas[mask_mod],
             vq[mask_mod],
-            s=80,
-            facecolors="none",
-            edgecolors="red",
-            linewidths=1.4,
+            s=50,
+            marker="D",
+            color="#7B61FF",
+            edgecolor="black",
+            linewidth=1.0,
             label="Modificado",
-            zorder=5,
+            zorder=6,
         )
 
-    axes[1].set_title("Serie Corregida")
-    axes[1].grid(True, linestyle="--", alpha=0.4)
-    axes[1].legend()
+    # Faltantes
+    mask_missing = df_qc["valor"] == -99
+    if np.any(mask_missing):
+        yvals = vq[~np.isnan(vq)]
+        if yvals.size > 0:
+            ymin = np.nanmin(yvals)
+            ymax = np.nanmax(yvals)
+            rng = max(1, ymax - ymin)
+            y_offset = ymin - 0.1 * rng
+        else:
+            y_offset = -1
 
-    axes[1].xaxis.set_major_locator(locator)
-    axes[1].xaxis.set_major_formatter(formatter)
-    axes[1].tick_params(axis="x", rotation=35)
+        ax2.scatter(
+            fechas[mask_missing],
+            [y_offset] * mask_missing.sum(),
+            s=50,
+            marker="o",
+            facecolors="none",
+            edgecolors="#D62728",
+            linewidths=1.3,
+            label="Faltante (-99)",
+            zorder=7,
+        )
+
+    ax2.set_title("Serie Corregida", pad=14)
+    ax2.legend()
+
+    ax2.xaxis.set_major_locator(locator)
+    ax2.xaxis.set_major_formatter(formatter)
+    ax2.tick_params(axis="x", rotation=35)
 
     fig.tight_layout()
 
     outdir = Path(folder_out)
     outdir.mkdir(parents=True, exist_ok=True)
     fname = f"{var}_{periodo}_{estacion.upper()}_comparacion.png"
-    fig.savefig(outdir / fname, dpi=160, bbox_inches="tight")
+    fig.savefig(outdir / fname, dpi=140, bbox_inches="tight")
 
     plt.close(fig)
+    return str(outdir / fname)
+
+
+def plot_image_preview(path_png: str):
+    try:
+        img = plt.imread(path_png)
+        plt.figure(figsize=(8, 4))
+        plt.imshow(img)
+        plt.axis("off")
+        plt.show(block=False)
+    except Exception as e:
+        print(f"No se puede previsualizar imagen: {e}")

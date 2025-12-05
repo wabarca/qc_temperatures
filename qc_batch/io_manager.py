@@ -44,7 +44,7 @@ def build_filename(var: str, periodo: str, estacion: str, suffix: str):
         suf = "QC"
     else:
         suf = suffix
-    return f"{var}_{periodo}_{estacion}_{suf}.csv"
+    return f"{var}_{periodo}_{estacion.upper()}_{suf}.csv"
 
 
 def _safe_read_csv(path: Path) -> pd.DataFrame:
