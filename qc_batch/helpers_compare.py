@@ -84,21 +84,10 @@ def compare_with_other_station(
     prompt_first: bool = True,
     estacion_comp: str = None,
 ):
-    """
-    Flujo interactivo para comparación con otras estaciones.
-
-    - Si prompt_first == True  → comportamiento interactivo clásico.
-    - Si prompt_first == False → workflow ya preguntó y ya proporcionó el ID.
-        En este modo:
-            * NO se vuelve a preguntar si desea comparar
-            * NO se hace la búsqueda inicial de la variable principal (evita doble fallback)
-            * SOLO se cargan datos dentro del loop vars_all (1 vez por variable)
-    """
-
     fecha_obj = pd.to_datetime(fecha_obj)
 
     # ======================================================
-    # MODO NO-INTERACTIVO (cuando workflow ya preguntó)
+    # MODO NO-INTERACTIVO
     # ======================================================
     if not prompt_first and estacion_comp:
         estacion_comp = estacion_comp.strip()
@@ -106,12 +95,6 @@ def compare_with_other_station(
             print("⚠ Código de estación vacío.")
             return None
 
-        # ----------------------------------------
-        # NO llamar find_series_for_station_full_fallback() aquí
-        # (Evita el doble FALLBACK para TMAX)
-        # ----------------------------------------
-
-        # Cargar todas las variables directamente
         vars_all = ["tmax", "tmean", "tmin", "pr"]
         dfs = {}
 
@@ -124,24 +107,30 @@ def compare_with_other_station(
                     dfv = read_series(path_v).copy()
                     dfv["fecha"] = pd.to_datetime(dfv["fecha"])
                     dfs[v] = dfv
-                except Exception as e:
-                    print(f"⚠ Error leyendo {v} de estación {estacion_comp}: {e}")
+                except:
                     dfs[v] = None
             else:
                 dfs[v] = None
 
-        # Encontrar la fecha equivalente más cercana
+        # Protección: la variable principal debe existir
         df_base = dfs.get(var)
         if df_base is None or df_base.empty:
-            print(
-                f"⚠ No se encontró serie para {var.upper()} en estación {estacion_comp}."
-            )
+            print(f"⚠ No hay datos de {var.upper()} en estación {estacion_comp}.")
             return None
 
+        # Buscar fecha equivalente
         idx = (df_base["fecha"] - fecha_obj).abs().idxmin()
         fecha_real = df_base.loc[idx, "fecha"]
 
-        # Mostrar gráfico comparativo
+        # FIX: remover variables vacías
+        dfs = {k: v for k, v in dfs.items() if v is not None and not v.empty}
+
+        if var not in dfs:
+            print(
+                f"⚠ La estación {estacion_comp} no tiene datos útiles para {var.upper()}."
+            )
+            return None
+
         fig_aux = plot_context_2x2(
             dfs,
             var_principal=var,
@@ -156,7 +145,7 @@ def compare_with_other_station(
         return fig_aux
 
     # ======================================================
-    # MODO INTERACTIVO COMPLETO (sin workflow)
+    # MODO INTERACTIVO
     # ======================================================
     while True:
         resp = (
@@ -176,7 +165,6 @@ def compare_with_other_station(
             print("⚠ Código vacío.")
             continue
 
-        # Búsqueda individual inicial (válida SOLO en modo interactivo)
         path = find_series_for_station_full_fallback(
             folder_in, folder_out, var, periodo, estacion_comp_local
         )
@@ -187,14 +175,19 @@ def compare_with_other_station(
             )
             continue
 
-        # Cargar serie auxiliar base
         df_aux = read_series(path).copy()
         df_aux["fecha"] = pd.to_datetime(df_aux["fecha"])
+
+        if df_aux.empty:
+            print(
+                f"⚠ La estación {estacion_comp_local} no tiene datos de {var.upper()}."
+            )
+            continue
 
         idx = (df_aux["fecha"] - fecha_obj).abs().idxmin()
         fecha_real = df_aux.loc[idx, "fecha"]
 
-        # Cargar TODAS las variables
+        # Cargar todas las variables
         vars_all = ["tmax", "tmean", "tmin", "pr"]
         dfs = {}
 
@@ -207,11 +200,19 @@ def compare_with_other_station(
                     dfv = read_series(path_v).copy()
                     dfv["fecha"] = pd.to_datetime(dfv["fecha"])
                     dfs[v] = dfv
-                except Exception as e:
-                    print(f"⚠ Error leyendo {v} de estación {estacion_comp_local}: {e}")
+                except:
                     dfs[v] = None
             else:
                 dfs[v] = None
+
+        # FIX: eliminar variables vacías de la estación comparada
+        dfs = {k: v for k, v in dfs.items() if v is not None and not v.empty}
+
+        if var not in dfs:
+            print(
+                f"⚠ La estación {estacion_comp_local} no tiene datos para {var.upper()} en esta fecha."
+            )
+            return None
 
         fig_aux = plot_context_2x2(
             dfs,

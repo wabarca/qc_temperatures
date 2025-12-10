@@ -234,11 +234,9 @@ def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
         return
 
     if accion == "r":
-        # Reanudar desde tmp
-        if existe_tmp:
-            print(f"🔁 Reanudando desde TMP: {entry['path'].name}\n")
-        else:
-            print("⚠️ No existe TMP, procesando desde cero.\n")
+        # Revisar desde cero SI el usuario lo pidió expresamente,
+        # ignorando QC y TMP por completo.
+        print(f"🔄 Revisando desde cero (ignorando QC y TMP): {entry['path'].name}\n")
 
         process_file(
             var=var,
@@ -246,6 +244,7 @@ def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
             estacion=estacion,
             folder_in=folder_in,
             folder_out=folder_out,
+            start_from="org",
             lower_p=lower_p,
             upper_p=upper_p,
             k=k,

@@ -59,52 +59,54 @@ def _safe_read_csv(path: Path) -> pd.DataFrame:
 
 def read_series(path: str) -> pd.DataFrame:
     """
-    Lee un archivo CSV de dos columnas:
-       FECHA, <NOMBRE_ESTACION>
-    y lo convierte en un formato estándar:
-       fecha, valor
+    Lee un archivo CSV con formato:
+       FECHA,<ID_ESTACION>
+    y lo normaliza al formato interno:
+       fecha (datetime), valor (float)
     """
-    import pandas as pd
+    df = _safe_read_csv(path)
 
-    df = pd.read_csv(path, sep=None, engine="python")
-    df.columns = [c.strip().lower() for c in df.columns]
+    cols = list(df.columns)
 
-    # Renombrar primera columna → fecha
-    df = df.rename(columns={df.columns[0]: "fecha"})
+    if len(cols) < 2:
+        raise ValueError(f"Archivo inválido: {path}")
 
-    # Renombrar segunda columna → valor
-    df = df.rename(columns={df.columns[1]: "valor"})
+    # columna de estación = segunda columna
+    col_id = cols[1]
 
-    # Convertir fecha
-    df["fecha"] = pd.to_datetime(
-        df["fecha"].astype(str), format="%Y%m%d", errors="coerce"
-    )
+    df = df.rename(columns={"FECHA": "fecha", col_id: "valor"})
 
-    # Normalizar valor
-    df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(-99)
-    df["valor"] = df["valor"].replace([-99.0, -99.9, -99.00], -99)
+    df["fecha"] = pd.to_datetime(df["fecha"], format="%Y%m%d", errors="coerce")
+    df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
 
-    return df
+    # eliminar filas totalmente inválidas
+    df = df.dropna(subset=["fecha"])
+
+    return df[["fecha", "valor"]]
 
 
 def _ensure_outdir(folder_out: str):
     Path(folder_out).mkdir(parents=True, exist_ok=True)
 
 
+# en io_manager.py — reemplazar write_tmp por esta versión
 def write_tmp(
     df: pd.DataFrame, folder_out: str, var: str, periodo: str, estacion: str
 ) -> str:
-    """
-    Guarda DataFrame como var_periodo_estacion_tmp.csv en folder_out.
-    El dataframe debe tener columnas ['fecha','valor'] donde 'fecha' es datetime.
-    Devuelve la ruta escrita.
-    """
     _ensure_outdir(folder_out)
-    fname = build_filename(var, periodo, estacion, "tmp")
+    estacion_upper = estacion.upper()
+    fname = build_filename(var, periodo, estacion_upper, "tmp")
     p = Path(folder_out) / fname
+
     df_out = df.copy()
-    # formatear fecha a YYYYMMDD
-    df_out["fecha"] = df_out["fecha"].dt.strftime("%Y%m%d")
+    # FECHA como YYYYMMDD
+    df_out["FECHA"] = pd.to_datetime(df_out["fecha"]).dt.strftime("%Y%m%d")
+    # colocar valores en columna con nombre de estación (numéricos)
+    df_out[estacion_upper] = df_out["valor"]
+    # mantener solo FECHA y <ID_ESTACION>
+    df_out = df_out[["FECHA", estacion_upper]]
+
+    p.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(p, index=False)
     return str(p)
 
@@ -113,14 +115,28 @@ def write_qc(
     df: pd.DataFrame, folder_out: str, var: str, periodo: str, estacion: str
 ) -> str:
     """
-    Guarda DataFrame como var_periodo_estacion_qc.csv en folder_out.
-    Devuelve la ruta escrita.
+    Guarda DataFrame como var_periodo_estacion_qc.csv en formato:
+    FECHA,<ID_ESTACION>
     """
     _ensure_outdir(folder_out)
-    fname = build_filename(var, periodo, estacion, "qc")
+
+    estacion_upper = estacion.upper()
+    col_id = estacion_upper
+
+    fname = build_filename(var, periodo, estacion_upper, "qc")
     p = Path(folder_out) / fname
+
     df_out = df.copy()
-    df_out["fecha"] = df_out["fecha"].dt.strftime("%Y%m%d")
+
+    # FECHA → YYYYMMDD
+    df_out["FECHA"] = pd.to_datetime(df_out["fecha"]).dt.strftime("%Y%m%d")
+
+    # valor → <ID_ESTACION>
+    df_out[col_id] = df_out["valor"]
+
+    # mantener solo FECHA y ID
+    df_out = df_out[["FECHA", col_id]]
+
     df_out.to_csv(p, index=False)
     return str(p)
 
@@ -130,39 +146,40 @@ def find_candidate_file(
 ) -> Dict[str, Any]:
     """
     Prioridad de retorno:
-      1) *_tmp.csv  (intermedio en folder_out)
-      2) *_QC.csv   (final en folder_out)
+      1) *_qc.csv   (final en folder_out)
+      2) *_tmp.csv  (intermedio en folder_out)
       3) *_org.csv  (original en folder_in)
-    Retorna dict {"status": "tmp"|"qc"|"org"|None, "path": path_or_None, "base_name": base_name_str}
+      4) fallback sin sufijo org (var_periodo_estacion.csv)
     """
     folder_in = Path(folder_in)
     folder_out = Path(folder_out)
 
-    candidates = []
-
-    # construir nombres esperados
-    fname_tmp = build_filename(var, periodo, estacion, "tmp")
+    # Construir nombres esperados
     fname_qc = build_filename(var, periodo, estacion, "qc")
+    fname_tmp = build_filename(var, periodo, estacion, "tmp")
     fname_org = build_filename(var, periodo, estacion, "org")
 
-    p_tmp = folder_out / fname_tmp
-    if p_tmp.exists():
-        return {"status": "tmp", "path": str(p_tmp), "base_name": fname_tmp}
-
+    # 1) Buscar QC
     p_qc = folder_out / fname_qc
     if p_qc.exists():
         return {"status": "qc", "path": str(p_qc), "base_name": fname_qc}
 
-    # buscar org en folder_in (aceptar también archivos sin sufijo org, por compatibilidad)
+    # 2) Buscar TMP
+    p_tmp = folder_out / fname_tmp
+    if p_tmp.exists():
+        return {"status": "tmp", "path": str(p_tmp), "base_name": fname_tmp}
+
+    # 3) Buscar ORG (incluye sufijo _org.csv)
     p_org = folder_in / fname_org
     if p_org.exists():
         return {"status": "org", "path": str(p_org), "base_name": fname_org}
 
-    # fallback: intentar sin sufijo org (var_periodo_estacion.csv)
+    # 4) Fallback (var_periodo_estacion.csv sin sufijo)
     fallback = folder_in / f"{var}_{periodo}_{estacion}.csv"
     if fallback.exists():
         return {"status": "org", "path": str(fallback), "base_name": fallback.name}
 
+    # No se encontró nada
     return {"status": None, "path": None, "base_name": None}
 
 

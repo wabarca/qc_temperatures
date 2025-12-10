@@ -22,7 +22,6 @@ import json
 from qc_batch.io_manager import (
     find_candidate_file,
     read_series,
-    write_tmp,
     write_qc,
     build_filename,
 )
@@ -96,6 +95,147 @@ def sugerir_accion_outlier(valor, p_low, p_high, iqr):
     )
 
 
+# ============================================================
+# CARGA INTELIGENTE DE SERIES PARA REVISIÓN PARCIAL (start_from="qc")
+# Prioridad: 1) QC  2) TMP  3) ORG
+# Incluye PR (que antes NO se cargaba).
+# ============================================================
+
+
+def _load_triplet_from_qc(folder_out, folder_in, periodo, estacion):
+    estacion = estacion.upper()
+    vars_all = ["tmin", "tmean", "tmax", "pr"]
+    result = {}
+    paths_trip = {}
+
+    for var in vars_all:
+        path_qc = Path(folder_out) / build_filename(var, periodo, estacion, "qc")
+        path_tmp = Path(folder_out) / build_filename(var, periodo, estacion, "tmp")
+        path_org = Path(folder_in) / build_filename(var, periodo, estacion, "org")
+
+        df = None
+        origen = "N/D"
+
+        if path_qc.exists():
+            try:
+                df = read_series(str(path_qc))
+                origen = str(path_qc)
+            except:
+                df = None
+
+        if df is None and path_tmp.exists():
+            try:
+                df = read_series(str(path_tmp))
+                origen = str(path_tmp)
+            except:
+                df = None
+
+        if df is None and path_org.exists():
+            try:
+                df = read_series(str(path_org))
+                origen = str(path_org)
+            except:
+                df = None
+
+        result[var] = df
+        paths_trip[var] = origen
+
+    return result, paths_trip
+
+
+def load_triplet_from_org(folder_in, periodo, estacion):
+    """
+    Carga tmin, tmean, tmax y pr desde la carpeta ORG con fallbacks:
+      - intenta nombres exactos con sufijo _org
+      - si var == 'tmean' intenta también 'ts'
+      - intenta archivos sin sufijo (compatibilidad)
+      - intenta patrón flexible var_*_{estacion}*.csv
+    Retorna (dfs, paths)
+    """
+    from pathlib import Path
+    from qc_batch.io_manager import build_filename, normalize_var_name, read_series
+
+    folder_in = Path(folder_in)
+    estacion_up = estacion.upper()
+
+    vars_trip = ["tmin", "tmean", "tmax", "pr"]
+    dfs = {}
+    paths = {}
+
+    for v in vars_trip:
+        tried = []
+        df = None
+        path_found = "N/D"
+
+        # 1) Nombre exacto con sufijo _org
+        fname = build_filename(v, periodo, estacion_up, "org")
+        p = folder_in / fname
+        tried.append(str(p))
+        if p.exists():
+            try:
+                df = read_series(str(p))
+                path_found = str(p)
+            except Exception:
+                df = None
+
+        # 2) Si var == tmean intentar 'ts'
+        if df is None and v == "tmean":
+            alt_fname = build_filename("ts", periodo, estacion_up, "org")
+            p2 = folder_in / alt_fname
+            tried.append(str(p2))
+            if p2.exists():
+                try:
+                    df = read_series(str(p2))
+                    path_found = str(p2)
+                except Exception:
+                    df = None
+
+        # 3) Intentar archivo sin sufijo: var_periodo_estacion.csv
+        if df is None:
+            alt3 = folder_in / f"{v}_{periodo}_{estacion_up}.csv"
+            tried.append(str(alt3))
+            if alt3.exists():
+                try:
+                    df = read_series(str(alt3))
+                    path_found = str(alt3)
+                except Exception:
+                    df = None
+
+        # 4) Intentar patrón flexible (cualquier periodo) var_*_{estacion}*.csv (org o no)
+        if df is None:
+            pattern = f"{v}_*_{estacion_up}*.csv"
+            matches = sorted(folder_in.glob(pattern))
+            if matches:
+                for m in matches:
+                    tried.append(str(m))
+                    try:
+                        df = read_series(str(m))
+                        path_found = str(m)
+                        break
+                    except Exception:
+                        df = None
+
+        # 5) para tmean intentar patrón con 'ts' también
+        if df is None and v == "tmean":
+            pattern_ts = f"ts_*_{estacion_up}*.csv"
+            matches_ts = sorted(folder_in.glob(pattern_ts))
+            if matches_ts:
+                for m in matches_ts:
+                    tried.append(str(m))
+                    try:
+                        df = read_series(str(m))
+                        path_found = str(m)
+                        break
+                    except Exception:
+                        df = None
+
+        # asignar resultados
+        dfs[v] = df
+        paths[v] = path_found
+
+    return dfs, paths
+
+
 # ================================================================
 #  Función principal
 # ================================================================
@@ -121,6 +261,8 @@ def process_file(
     if ask_user is None:
         ask_user = input
 
+    paths_loaded = {}
+
     # Excluir variables NO térmicas (solo pr)
     if var.lower() not in ("tmax", "tmean", "tmin"):
         print(f"⏭ Omitiendo variable no térmica: {var}")
@@ -135,12 +277,33 @@ def process_file(
         print(f"No se encontró archivo para {var}_{periodo}_{estacion}")
         return
 
-    if start_from == "qc":
+    # --- bandera para evitar recarga accidental del triplete ---
+    triplet_loaded = False
+
+    # Forzar archivo ORG si se indicó explícitamente desde main_batch
+    if start_from == "org":
+        status = "org"
+        path_base = Path(folder_in) / build_filename(var, periodo, estacion, "org")
+        print(f"[{var.upper()}] Forzando carga desde ORG: {path_base}")
+        # Cargar TMIN, TMEAN, TMAX y PR exclusivamente desde ORG
+        dfs_trip, paths_trip = load_triplet_from_org(folder_in, periodo, estacion)
+        triplet_loaded = True
+
+        # Cargar la variable principal desde ORG y sobrescribir solo esa variable
+        df_var_base = read_series(str(path_base))
+        dfs_trip[var] = df_var_base
+
+    # Forzar QC si se pidió explícitamente revisión parcial
+    elif start_from == "qc":
         status = "qc"
         path_base = Path(folder_out) / build_filename(var, periodo, estacion, "qc")
         print(f"[{var.upper()}] Revisión parcial usando QC: {path_base}")
+
     else:
         print(f"[{var.upper()}] Archivo base detectado: {status.upper()} → {path_base}")
+
+    # Registrar ruta real del archivo cargado para la variable principal
+    paths_loaded[var] = str(path_base)
 
     # Leer ORG para comparativa final (buscar org o fallback sin sufijo; aceptar alias ts<->tmean)
     path_org = Path(folder_in) / build_filename(var, periodo, estacion, "org")
@@ -181,26 +344,45 @@ def process_file(
         # si no se pudo leer, crear df_org vacío con fechas del df_base si existe
         df_org = None
 
-    # ---------------------------------------------------------------------
-    # Cargar triplete según start_from
-    # ---------------------------------------------------------------------
-    def _load_triplet_from_qc(folder_out, periodo, estacion):
-        res = {}
-        for vname in ("tmin", "tmean", "tmax"):
-            p = Path(folder_out) / build_filename(vname, periodo, estacion, "qc")
-            if p.exists():
-                try:
-                    res[vname] = read_series(str(p))
-                except Exception:
-                    res[vname] = None
-            else:
-                res[vname] = None
-        return res
+    # ------------------------------------------
+    # Cargar triplete SOLO si no se cargó antes
+    # ------------------------------------------
+    if not triplet_loaded:
+        if start_from == "qc":
+            dfs_trip, paths_trip = _load_triplet_from_qc(
+                folder_out, folder_in, periodo, estacion
+            )
+        elif start_from == "org":
+            # Ya fue cargado antes → NO recargar
+            pass
+        else:
+            dfs_trip, paths_trip = load_triplet(
+                folder_in, folder_out, periodo, estacion
+            )
 
-    if start_from == "qc":
-        dfs_trip = _load_triplet_from_qc(folder_out, periodo, estacion)
-    else:
-        dfs_trip = load_triplet(folder_in, folder_out, periodo, estacion)
+    # Registrar rutas reales para TMIN, TMEAN, TMAX y PR (usar paths_trip ya poblado)
+    for v_local in ["tmin", "tmean", "tmax", "pr"]:
+        paths_loaded[v_local] = paths_trip.get(v_local, "N/D")
+
+    # ============================================================
+    # 📝 Mostrar origen de cada dataset cargado en el triplete
+    # ============================================================
+
+    print("\n📂 Archivos cargados para esta sesión:")
+
+    for v_local in ["tmin", "tmean", "tmax", "pr"]:
+        df = dfs_trip.get(v_local)
+        ruta = paths_loaded.get(v_local, "N/D")
+
+        if df is None or df.empty:
+            print(f"   • {v_local.upper():<5} → SIN DATOS → {ruta}")
+        else:
+            fmin = df["fecha"].min().date()
+            fmax = df["fecha"].max().date()
+            print(
+                f"   • {v_local.upper():<5} → filas={len(df)}, "
+                f"rango=({fmin} → {fmax}) → {ruta}"
+            )
 
     # =========================================================
     #  CONTROL TERMODINÁMICO (BUCLE DINÁMICO CORREGIDO)
@@ -217,6 +399,24 @@ def process_file(
     total_inconsist = len(inconsist)
     print(f"🌡 Se detectaron {total_inconsist} inconsistencias térmicas iniciales.")
     corregidas = 0
+
+    # ===============================================
+    # ❓ Preguntar si continuar o saltar este archivo
+    # ===============================================
+    if total_inconsist > 0:
+        resp = (
+            ask_user(
+                f"\n⚠️  Este archivo tiene {total_inconsist} inconsistencias térmicas.\n"
+                "¿Desea revisarlas ahora? (s = sí, n = dejar para después): "
+            )
+            .strip()
+            .lower()
+        )
+
+        # Si responde "n", "no", o cualquier cosa que no sea sí → skip inmediato
+        if resp not in ("s", "y", ""):
+            print("\n⏭ Archivo omitido por decisión del usuario.\n")
+            return dfs_trip  # ← No hace revisión térmica
 
     # 🔁 Bucle dinámico: mientras existan inconsistencias, procesarlas
     while len(inconsist) > 0:
@@ -240,14 +440,15 @@ def process_file(
             show=True,
         )
 
-        # Comparar solo si el usuario realmente lo desea, UNA sola vez por inconsistencia
-        if ask_user(
+        # Comparar solo si el usuario realmente lo desea, UNA o VARIAS veces
+        while ask_user(
             "¿Desea comparar con otra estación para el mismo día? (s/n): "
         ).strip().lower() in ("s", "y"):
-            # Pedir ID UNA vez y delegar la comparación en modo no-interactivo
+
             estacion_comp = ask_user(
                 "Ingrese el ID de la estación (ej. S-12): "
             ).strip()
+
             if estacion_comp:
                 compare_with_other_station(
                     var,
@@ -262,38 +463,68 @@ def process_file(
                     estacion_comp=estacion_comp,
                 )
             else:
-                print("⚠ Código de estación vacío. Omitiendo comparación.\n")
+                print("⚠ Código de estación vacío. Omitiendo.\n")
 
         # -----------------------------------------------------------
-        # Merge robusto del triplete (corrige arrastre incorrecto)
+        # Merge robusto del triplete (TMEAN es opcional)
         # -----------------------------------------------------------
-        trip = (
-            dfs_trip["tmin"][["fecha", "valor"]]
-            .rename(columns={"valor": "tmin"})
-            .merge(
-                dfs_trip["tmean"][["fecha", "valor"]].rename(
-                    columns={"valor": "tmean"}
-                ),
-                on="fecha",
-                how="outer",
-            )
-            .merge(
-                dfs_trip["tmax"][["fecha", "valor"]].rename(columns={"valor": "tmax"}),
-                on="fecha",
-                how="outer",
-            )
-        )
 
-        # Asegurar orden por fecha
-        trip = trip.sort_values("fecha")
+        # Extraer cada variable térmica de manera segura
+        df_tmin = dfs_trip.get("tmin")
+        df_tmean = dfs_trip.get("tmean")
+        df_tmax = dfs_trip.get("tmax")
+
+        # Asegurar DataFrames consistentes
+        if df_tmin is not None and not df_tmin.empty:
+            df_tmin = df_tmin[["fecha", "valor"]].rename(columns={"valor": "tmin"})
+        else:
+            df_tmin = None
+
+        if df_tmean is not None and not df_tmean.empty:
+            df_tmean = df_tmean[["fecha", "valor"]].rename(columns={"valor": "tmean"})
+        else:
+            df_tmean = None  # TMEAN es opcional
+
+        if df_tmax is not None and not df_tmax.empty:
+            df_tmax = df_tmax[["fecha", "valor"]].rename(columns={"valor": "tmax"})
+        else:
+            df_tmax = None
+
+        # Iniciar merge con la primera variable disponible
+        if df_tmin is not None:
+            trip = df_tmin.copy()
+        elif df_tmean is not None:
+            trip = df_tmean.copy()
+        elif df_tmax is not None:
+            trip = df_tmax.copy()
+        else:
+            print("⚠ No hay datos térmicos disponibles para generar el triplete.")
+            trip = pd.DataFrame(columns=["fecha", "tmin", "tmean", "tmax"])
+
+        # Agregar TMEAN si existe
+        if df_tmean is not None:
+            trip = trip.merge(df_tmean, on="fecha", how="outer")
+
+        # Agregar TMAX si existe
+        if df_tmax is not None:
+            trip = trip.merge(df_tmax, on="fecha", how="outer")
+
+        # Ordenar por fecha y resetear índice
+        trip = trip.sort_values("fecha").reset_index(drop=True)
 
         # Extraer fila exacta para la inconsistencia
         vals = trip.loc[trip["fecha"] == fecha]
 
         # Validación: si falta valor se toma como -99 explícito (no mezcla datos viejos)
-        tmin_val = float(vals["tmin"].fillna(-99).iloc[0])
-        tmean_val = float(vals["tmean"].fillna(-99).iloc[0])
-        tmax_val = float(vals["tmax"].fillna(-99).iloc[0])
+        # Usar .get para proteger contra columnas faltantes tras merge
+        def _safe_get(vals_df, col):
+            if col in vals_df.columns:
+                return float(vals_df[col].fillna(-99).iloc[0])
+            return -99.0
+
+        tmin_val = _safe_get(vals, "tmin")
+        tmean_val = _safe_get(vals, "tmean")
+        tmax_val = _safe_get(vals, "tmax")
 
         # Reglas de validez
         validos = [v != -99 for v in (tmin_val, tmean_val, tmax_val)]
@@ -382,16 +613,9 @@ def process_file(
         except:
             pass
 
-        # --------- guardar TMP después de la acción ---------
-        for v_local, df_local in dfs_trip.items():
-            fname_tmp = build_filename(v_local, periodo, estacion, "tmp")
-            ruta_tmp = os.path.join(folder_out, fname_tmp)
-
-            df_out = df_local.copy()
-            df_out[df_out.columns[0]] = df_out[df_out.columns[0]].dt.strftime("%Y%m%d")
-            df_out.to_csv(ruta_tmp, index=False)
-
-        print(f"💾 TMP guardado para {fecha_str}.")
+        # Guardar TMP coherente después de *cada* corrección
+        write_triplet_tmp(dfs_trip, folder_out, periodo, estacion)
+        print(f"💾 TMP actualizado para {fecha_str}.")
 
         # 🔁 Recalcular inconsistencias con el triplete ACTUALIZADO
         inconsist_new = detect_thermal_inconsistencies(
@@ -434,24 +658,68 @@ def process_file(
     print("===========================================\n")
 
     # DF base de la variable
-    df_base = dfs_trip[var]
+    # Recuperar siempre la serie original corregida SIN merges
+    df_base = dfs_trip[var][["fecha", "valor"]].copy()
+
+    # Si quedó vacía, intentar recuperar desde el archivo base original
+    if df_base.empty:
+        print("⚠ df_base vacío tras control térmico — recuperando desde ORG...")
+        df_base = read_series(str(path_org))
 
     # =========================================================
-    # CONTROL ESTADÍSTICO
+    #  CONTROL ESTADÍSTICO
     # =========================================================
-    serie_valida = df_base[df_base["valor"] != -99]["valor"]
-    bounds = compute_bounds(serie_valida, lower_p=lower_p, upper_p=upper_p, k=k)
-    outliers = detect_outliers(df_base, bounds)
 
-    total_outliers = len(outliers)
+    # PR no participa en el análisis estadístico
+    if var.lower() == "pr":
+        print(
+            "⏭ PR se usa solo como referencia en gráficas — se omite control estadístico."
+        )
+        outliers = []
+        total_outliers = 0
+        resumen_outliers = []
+        bounds = {"p_low": None, "p_high": None, "iqr": None}
+    else:
+        # Validar serie
+        if df_base is None or df_base.empty:
+            print(
+                "⚠ No hay datos para evaluar estadísticamente. Se omite control estadístico."
+            )
+            outliers = []
+            total_outliers = 0
+            resumen_outliers = []
+            bounds = {"p_low": None, "p_high": None, "iqr": None}
+        else:
+            # Serie válida (sin -99)
+            serie_valida = df_base[df_base["valor"] != -99]["valor"]
+
+            # Calcular límites
+            bounds = compute_bounds(serie_valida, lower_p=lower_p, upper_p=upper_p, k=k)
+
+            # Detectar outliers
+            outliers = detect_outliers(df_base, bounds)
+            total_outliers = len(outliers)
+            resumen_outliers = []
+
+            print(f"📊 Se detectaron {total_outliers} outliers estadísticos.")
+
+    # =========================================================
+    #  PROCESAMIENTO INTERACTIVO (MENÚ ESTADÍSTICO)
+    # =========================================================
+
     corregidos_est = 0
-    print(f"📊 Se detectaron {total_outliers} outliers estadísticos.")
-    resumen_outliers = []
+
+    # PR no debe entrar al menú estadístico
+    if var.lower() == "pr":
+        return
 
     for idx, val in outliers:
-        fecha = df_base.loc[idx, "fecha"]
 
-        print(f"\nOutlier estadístico en {fecha.date()} → {val}")
+        fecha = df_base.loc[idx, "fecha"]
+        fecha_str = fecha.strftime("%Y-%m-%d")
+        valor = val
+
+        print(f"\nOutlier estadístico en {fecha_str} → {valor}")
 
         # Mostrar contexto completo
         fig = plot_context_2x2(
@@ -465,81 +733,146 @@ def process_file(
             show=True,
         )
 
-        # Comparación por ID
+        # Comparación por ID con otras estaciones
         compare_with_other_station(
             var, periodo, estacion, fecha, folder_in, folder_out, ventana, ask_user
         )
 
-        # ==================================================
-        # MENÚ ESTADÍSTICO MEJORADO
-        # ==================================================
+        # No puede usarse bounds si era PR o si no había datos
+        if bounds["p_low"] is not None:
+            p_low = bounds["p_low"]
+            p_high = bounds["p_high"]
+            iqr = bounds["iqr"]
 
-        # Obtener límites estadísticos
-        p_low = bounds["p_low"]
-        p_high = bounds["p_high"]
-        iqr = bounds["iqr"]
+            # Sugerencia automática basada en reglas estadísticas
+            sug, msg = sugerir_accion_outlier(valor, p_low, p_high, iqr)
 
-        valor = val
-        fecha_str = fecha.strftime("%Y-%m-%d")
+            print("\n-----------------------------------------")
+            print(f"📊 Outlier estadístico detectado en {fecha_str}")
+            print("-----------------------------------------")
+            print(f"   Valor observado : {valor}")
+            print(f"   Rango esperado  : {p_low:.2f} – {p_high:.2f}")
+            print(f"   IQR             : {iqr:.2f}\n")
 
-        # Sugerencia automática
-        sug, msg = sugerir_accion_outlier(valor, p_low, p_high, iqr)
+            if sug:
+                print(f"💡 Sugerencia automática: {msg}")
+                print(f"   → Presione ENTER para aceptar ({sug}).\n")
+        else:
+            sug = None
+            print("\n(No se generaron límites estadísticos para esta variable.)\n")
 
-        print("\n-----------------------------------------")
-        print(f"📊 Outlier estadístico detectado en {fecha_str}")
-        print("-----------------------------------------")
-        print(f"   Valor observado : {valor}")
-        print(f"   Rango esperado  : {p_low:.2f} – {p_high:.2f}")
-        print(f"   IQR             : {iqr:.2f}\n")
-
-        if sug:
-            print(f"💡 Sugerencia automática: {msg}")
-            print(f"   → Presione ENTER para aceptar ({sug}).\n")
-
+        # Menú interactivo
         print("Acciones disponibles:")
-        print("   (s) ❌ Sustituir valor por -99")
+        print("   (s) ❌ Sustituir SOLO este valor por -99")
         print("   (m) 👍 Mantener valor original")
         print("   (n) ✏  Ingresar nuevo valor manualmente")
-        print("   (i) 🔄 Intercambiar con tmin/tmax si aplica")
-        print("   (p) ⏭  Pasar sin hacer cambios\n")
+        print("   (p) ⏭  Pasar sin hacer cambios")
+        print("\n   --- Opciones adicionales ---")
+        print("   (1) ❌ Sustituir TMIN por -99")
+        print("   (2) ❌ Sustituir TMAX por -99")
+        print("   (3) ❌ Sustituir TMEAN por -99")
+        print("   (a) ❌ Sustituir TMIN, TMAX y TMEAN por -99")
+        print()
 
-        # Capturar acción
+        # Capturar acción del usuario
         action = ask_user("Seleccione acción: ").strip().lower()
 
-        # ENTER = aceptar sugerencia
+        # ENTER acepta sugerencia automática (si existe)
         if action == "" and sug:
             action = sug
 
-        # Validar
-        while action not in ("s", "m", "n", "i", "p"):
+        # Validar entrada
+        valid_actions = ("s", "m", "n", "p", "1", "2", "3", "a")
+        while action not in valid_actions:
             print("❌ Acción inválida.")
             action = ask_user("Seleccione acción: ").strip().lower()
             if action == "" and sug:
                 action = sug
 
-        # Aplicar acción
+        # Aplicar decisión
         if action == "n":
+            # ingresar nuevo valor
             nuevo = float(ask_user(f"Nuevo valor para {fecha_str}: ").strip())
             df_base = apply_statistical_decision(df_base, idx, "n", nuevo)
-            corregidos_est += 1
-            print(f"✔ Outlier corregido. Progreso: {corregidos_est}/{total_outliers}\n")
-
             resumen_outliers.append(
-                {"fecha": fecha_str, "valor": val, "accion": action}
+                {"fecha": fecha_str, "valor": valor, "accion": "n", "nuevo": nuevo}
+            )
+
+        elif action == "1":
+            # Sustituir TMIN por -99 en la fecha correspondiente
+            fecha_mask = dfs_trip["tmin"]["fecha"] == fecha
+            if fecha_mask.any():
+                dfs_trip["tmin"].loc[fecha_mask, "valor"] = -99
+            else:
+                # crear fila si no existe
+                dfs_trip["tmin"].loc[len(dfs_trip["tmin"])] = {
+                    "fecha": fecha,
+                    "valor": -99,
+                }
+            resumen_outliers.append({"fecha": fecha_str, "accion": "tmin=-99"})
+
+        elif action == "2":
+            fecha_mask = dfs_trip["tmax"]["fecha"] == fecha
+            if fecha_mask.any():
+                dfs_trip["tmax"].loc[fecha_mask, "valor"] = -99
+            else:
+                dfs_trip["tmax"].loc[len(dfs_trip["tmax"])] = {
+                    "fecha": fecha,
+                    "valor": -99,
+                }
+            resumen_outliers.append({"fecha": fecha_str, "accion": "tmax=-99"})
+
+        elif action == "3":
+            # TMEAN
+            if dfs_trip.get("tmean") is None:
+                dfs_trip["tmean"] = pd.DataFrame(columns=["fecha", "valor"])
+            fecha_mask = dfs_trip["tmean"]["fecha"] == fecha
+            if fecha_mask.any():
+                dfs_trip["tmean"].loc[fecha_mask, "valor"] = -99
+            else:
+                dfs_trip["tmean"].loc[len(dfs_trip["tmean"])] = {
+                    "fecha": fecha,
+                    "valor": -99,
+                }
+            resumen_outliers.append({"fecha": fecha_str, "accion": "tmean=-99"})
+
+        elif action == "a":
+            # Sustituir los tres por -99
+            for vv in ("tmin", "tmean", "tmax"):
+                if dfs_trip.get(vv) is None:
+                    dfs_trip[vv] = pd.DataFrame(columns=["fecha", "valor"])
+                fecha_mask = dfs_trip[vv]["fecha"] == fecha
+                if fecha_mask.any():
+                    dfs_trip[vv].loc[fecha_mask, "valor"] = -99
+                else:
+                    dfs_trip[vv].loc[len(dfs_trip[vv])] = {"fecha": fecha, "valor": -99}
+            resumen_outliers.append(
+                {"fecha": fecha_str, "accion": "tmin,tmax,tmean=-99"}
             )
 
         else:
+            # acciones s, m, p se manejan igual que siempre
             df_base = apply_statistical_decision(df_base, idx, action)
-            corregidos_est += 1
-            print(f"✔ Outlier corregido. Progreso: {corregidos_est}/{total_outliers}\n")
-
             resumen_outliers.append(
-                {"fecha": fecha_str, "valor": val, "accion": action}
+                {"fecha": fecha_str, "valor": valor, "accion": action}
             )
 
-        # Registrar decisión estadística en changes_applied.json (para auditoría)
+        # Asegurar df_base refleje correcciones si la variable principal fue alterada
+        df_base = dfs_trip[var][["fecha", "valor"]].copy()
+
+        corregidos_est += 1
+        print(f"✔ Outlier corregido. Progreso: {corregidos_est}/{total_outliers}\n")
+
+        # Actualizar serie principal
+        dfs_trip[var] = df_base
+
+        for vv in ("tmin", "tmean", "tmax"):
+            if dfs_trip.get(vv) is not None:
+                dfs_trip[vv]["fecha"] = pd.to_datetime(dfs_trip[vv]["fecha"])
+                dfs_trip[vv] = dfs_trip[vv].sort_values("fecha").reset_index(drop=True)
+
+        # Registrar cambio en log (no crítico)
         try:
-            changes = None
             from qc_batch.thermo_qc import _load_changes, _save_changes
 
             changes = _load_changes(folder_out)
@@ -548,21 +881,20 @@ def process_file(
                 "estacion": estacion,
                 "fecha": fecha_str,
                 "accion": action,
-                "valor_prev": float(val),
+                "valor_prev": float(valor),
                 "valor_new": (
                     None
                     if action == "s"
-                    else (float(nuevo) if action == "n" else float(val))
+                    else (float(nuevo) if action == "n" else float(valor))
                 ),
                 "nota": "decisión estadística (workflow)",
             }
             changes.setdefault("single_changes", []).append(entry)
             _save_changes(folder_out, changes)
         except Exception:
-            # no crítico; seguir sin fallo
             pass
 
-        # ✔ Cerrar todas las ventanas abiertas
+        # Cerrar ventanas gráficas
         try:
             plt.close("all")
         except:
@@ -576,15 +908,34 @@ def process_file(
     # =========================================================
     # GUARDAR ARCHIVO QC
     # =========================================================
-    path_qc = write_qc(df_base, folder_out, var, periodo, estacion)
+    if var.lower() != "pr":
+        path_qc = write_qc(df_base, folder_out, var, periodo, estacion)
+
     print(f"\n✔ Archivo QC generado: {path_qc}")
 
     mark_completed(folder_out, Path(path_qc).name)
 
+    # ===========================================
+    # 🧹 Eliminar SOLO el TMP de la variable revisada
+    # ===========================================
+    tmp_file = Path(folder_out) / build_filename(var, periodo, estacion, "tmp")
+
+    if tmp_file.exists():
+        try:
+            tmp_file.unlink()
+            print(f"🧹 TMP eliminado: {tmp_file.name}")
+        except Exception as e:
+            print(f"⚠ No se pudo eliminar {tmp_file}: {e}")
+
     # =========================================================
     # ARCHIVO DE CAMBIOS
     # =========================================================
-    df_changes = build_changes_dataframe(df_org, df_base, folder_out)
+    if df_org is None:
+        print("⚠ No fue posible cargar ORG; se omite tabla de cambios.")
+        df_changes = pd.DataFrame()
+    else:
+        df_changes = build_changes_dataframe(df_org, df_base, folder_out)
+
     path_changes = save_changes_csv(df_changes, folder_out, var, periodo, estacion)
     print(f"📄 Archivo de cambios generado: {path_changes}")
 

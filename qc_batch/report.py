@@ -31,7 +31,7 @@ def _pagina_portada(pdf, var, periodo, estacion):
     texto = (
         f"INFORME DE CONTROL DE CALIDAD\n\n"
         f"Variable: {var.upper()}\n"
-        f"Estación: {estacion}\n"
+        f"Estación: {estacion.upper()}\n"
         f"Periodo: {periodo}\n\n"
         f"Generado el: {fecha}"
     )

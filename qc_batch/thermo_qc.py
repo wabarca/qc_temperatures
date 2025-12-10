@@ -21,12 +21,11 @@ try:
     from qc_batch.io_manager import (
         find_candidate_file,
         read_series,
-        write_tmp,
         build_filename,
     )
 except Exception:
     # fallback: try to import from local path if not packaged
-    from .io_manager import find_candidate_file, read_series, write_tmp, build_filename
+    from .io_manager import find_candidate_file, read_series, build_filename
 
 CHANGES_FNAME = "changes_applied.json"
 COMPLETED_FNAME = "completed_series.json"
@@ -55,46 +54,51 @@ def _save_changes(folder_out: str, changes: Dict[str, Any]):
         json.dump(changes, fh, indent=2, ensure_ascii=False)
 
 
-def load_triplet(
-    folder_in: str, folder_out: str, periodo: str, estacion: str
-) -> Dict[str, Optional[pd.DataFrame]]:
+def load_triplet(folder_in: str, folder_out: str, periodo: str, estacion: str):
     """
     Carga tmin, tmean, tmax y pr para la estación indicada.
 
     Prioridad:
-        1) *_tmp.csv   (folder_out)
-        2) *_QC.csv    (folder_out)
+        1) *_QC.csv    (folder_out)
+        2) *_tmp.csv   (folder_out)
         3) *_org.csv   (folder_in)
-        4) cualquier archivo que coincida en var_*_estación*.csv  ← Fallback flexible
+        4) fallback flexible (var_*_estacion*.csv)
+
+    Retorna:
+        dfs_trip  -> dict con DataFrames
+        paths_trip -> dict con rutas reales cargadas
     """
-    from .io_manager import find_candidate_file
 
     res = {}
+    paths_trip = {}
 
-    # Variables a cargar EXPLICITAS (no ts)
     variables = ["tmin", "tmean", "tmax", "pr"]
 
     for var in variables:
-        # 1. Intentar match exacto periodo + estacion
-        cand = find_candidate_file(folder_in, folder_out, var, periodo, estacion)
+
         df_loaded = None
+        ruta_usada = "N/D"
+
+        # Intentar match exacto periodo + estación
+        cand = find_candidate_file(folder_in, folder_out, var, periodo, estacion)
 
         if cand.get("path"):
+            ruta_usada = cand["path"]
             try:
-                df_loaded = read_series(cand["path"])
+                df_loaded = read_series(ruta_usada)
             except Exception:
                 df_loaded = None
 
-        # 2. Si no existe exacto → fallback flexible
+        # Si no se pudo cargar exacto → fallback flexible
         if df_loaded is None:
-            # Buscar cualquier archivo var_*_estacion*.csv en folder_in
+
             pattern = f"{var}_*_{estacion}*.csv"
             matches = list(Path(folder_in).glob(pattern))
 
-            # Si no existe ninguno, dejar None
             if matches:
+                ruta_usada = str(matches[0])
                 try:
-                    df_loaded = read_series(str(matches[0]))
+                    df_loaded = read_series(ruta_usada)
                     print(
                         f"[FALLBACK] Usando archivo {matches[0].name} para {var.upper()} en estación {estacion}"
                     )
@@ -102,8 +106,9 @@ def load_triplet(
                     df_loaded = None
 
         res[var] = df_loaded
+        paths_trip[var] = ruta_usada
 
-    return res
+    return res, paths_trip
 
 
 def detect_thermal_inconsistencies(
@@ -207,16 +212,6 @@ def detect_thermal_inconsistencies(
         except Exception:
             tipo = "indefinido"
 
-        if tipo is not None:
-            inconsistencias.append(
-                {
-                    "fecha": row["fecha"],
-                    "tmin": float(tmin),
-                    "tmean": float(tmean),
-                    "tmax": float(tmax),
-                    "tipo": tipo,
-                }
-            )
     return inconsistencias
 
 
@@ -241,6 +236,19 @@ def apply_thermal_correction(
     También registra en changes_applied.json una entrada de auditoría.
     """
     # Aseguramos dfs
+    # Aseguramos dfs
+    d_tmin = dfs.get("tmin")
+    d_tmean = dfs.get("tmean")
+    d_tmax = dfs.get("tmax")
+
+    # --- Solución: evitar aliasing accidental ---
+    # Forzamos copias profundas locales para que las modificaciones no propaguen
+    # a otras referencias externas que pudieran apuntar al mismo DataFrame.
+    for _k in ("tmin", "tmean", "tmax"):
+        if dfs.get(_k) is not None:
+            dfs[_k] = dfs[_k].copy(deep=True)
+
+    # refrescar referencias locales
     d_tmin = dfs.get("tmin")
     d_tmean = dfs.get("tmean")
     d_tmax = dfs.get("tmax")
@@ -269,8 +277,8 @@ def apply_thermal_correction(
         else:
             mask = _get_row_mask_by_fecha(df, fecha)
             if not mask.any():
-                # append row
-                df = df.append({"fecha": fecha, "valor": -99.0}, ignore_index=True)
+                # append row (compatibilidad pandas moderna)
+                df.loc[len(df)] = {"fecha": fecha, "valor": -99.0}
                 df = df.sort_values("fecha").reset_index(drop=True)
                 dfs[key] = df
 
@@ -402,16 +410,12 @@ def apply_thermal_correction(
         # acción desconocida: no hacer nada
         pass
 
-    # after applying, persist tmp CSVs
-    # ensure date columns are datetime
+    # Después de aplicar la corrección, solo aseguramos las fechas como datetime
     for k in ("tmin", "tmean", "tmax"):
         dfk = dfs.get(k)
         if dfk is not None:
-            # ensure datetime dtype
             dfk["fecha"] = pd.to_datetime(dfk["fecha"])
-            # sort
-            dfk = dfk.sort_values("fecha").reset_index(drop=True)
-            dfs[k] = dfk
+            dfs[k] = dfk.sort_values("fecha").reset_index(drop=True)
 
     # register change in JSON for audit
     after = {
@@ -422,7 +426,7 @@ def apply_thermal_correction(
 
     entry = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "estacion": estacion,
+        "estacion": estacion.upper(),
         "fecha": fecha.strftime("%Y-%m-%d"),
         "accion": accion,
         "nota": nota,
@@ -438,27 +442,37 @@ def apply_thermal_correction(
     return dfs
 
 
+from qc_batch.io_manager import (
+    write_tmp,
+)  # agregar al inicio del archivo si no está importado
+
+
 def write_triplet_tmp(
     dfs: Dict[str, pd.DataFrame], folder_out: str, periodo: str, estacion: str
 ) -> Dict[str, str]:
     """
-    Guarda los tres DataFrames como *_tmp.csv en folder_out usando write_tmp.
-    Retorna dict con rutas escritas.
+    Guarda los DataFrames tmin/tmean/tmax como *_tmp.csv en folder_out
+    reutilizando io_manager.write_tmp para garantizar formato consistente.
+    Retorna dict {var: ruta}
     """
     paths = {}
+    estacion_upper = estacion.upper()
+
     for var in ("tmin", "tmean", "tmax"):
         df = dfs.get(var)
         if df is None:
             continue
-        # ensure fecha column present
-        if "fecha" not in df.columns:
-            raise ValueError(f"DataFrame para {var} no tiene columna 'fecha'")
-        # use io_manager.write_tmp - but to avoid circular import, build filename and write via pandas
-        fname = build_filename(var, periodo, estacion, "tmp")
-        p = Path(folder_out) / fname
-        df_out = df.copy()
-        df_out["fecha"] = pd.to_datetime(df_out["fecha"]).dt.strftime("%Y%m%d")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        df_out.to_csv(p, index=False)
-        paths[var] = str(p)
+
+        # Normalizar columnas esperadas en df: 'fecha' (datetime o YYYYMMDD) y 'valor'
+        df_loc = df.copy()
+        # Si 'fecha' no está en formato datetime, intentar convertir; mantendremos 'fecha' como column needed by write_tmp
+        df_loc["fecha"] = pd.to_datetime(df_loc["fecha"], errors="coerce").dt.strftime(
+            "%Y%m%d"
+        )
+        df_loc["valor"] = pd.to_numeric(df_loc["valor"], errors="coerce")
+
+        # Usar io_manager.write_tmp que escribirá FECHA,<ID_ESTACION>
+        path_written = write_tmp(df_loc, folder_out, var, periodo, estacion_upper)
+        paths[var] = path_written
+
     return paths

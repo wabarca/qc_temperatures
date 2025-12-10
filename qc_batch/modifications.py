@@ -74,8 +74,17 @@ def extract_statistical_changes(
 
         val_qc = df_qc.loc[mask, "valor"].values[0]
 
-        # Compara cambios (NaN seguros)
-        if not np.isclose(val_org, val_qc, equal_nan=True):
+        # asegurar tipo numérico
+        try:
+            a = float(val_org)
+        except Exception:
+            a = np.nan
+        try:
+            b = float(val_qc)
+        except Exception:
+            b = np.nan
+
+        if not np.isclose(a, b, equal_nan=True):
             cambios[fecha_org.strftime("%Y-%m-%d")] = "estadistico"
 
     return cambios
@@ -145,6 +154,7 @@ def save_changes_csv(
     """
     Guarda archivo *_changes.csv asociado al QC.
     """
+    estacion = estacion.upper()
     fname = f"{var}_{periodo}_{estacion}_changes.csv"
     path = Path(folder_out) / fname
 

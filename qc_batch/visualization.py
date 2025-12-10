@@ -65,7 +65,7 @@ def obtener_monitor_opuesto():
 
     # Si solo hay un monitor → no hacemos nada
     if len(monitores) == 1:
-        return None
+        return monitores[0]  # el único monitor disponible
 
     # Si hay 2 → devolver el otro
     if len(monitores) == 2:
@@ -88,8 +88,8 @@ def mover_figura_a_monitor_opuesto(manager):
         return
 
     # Colocar ventana un poco dentro del monitor
-    x = monitor.x + 100
-    y = monitor.y + 100
+    x = monitor.x  # + 100
+    y = monitor.y  # + 100
 
     # Para backend TkAgg
     try:
@@ -138,9 +138,13 @@ COLOR_VAR = {
 
 def _draw_empty_panel(ax):
     ax.set_facecolor("#FAFAFA")
-    ax.grid(True, linestyle="--", alpha=0.35)
+
+    # No regenerar ticks ni grid: respetar los ejes ya definidos
+    # Mantener spines visibles
     for side in ["top", "bottom", "left", "right"]:
         ax.spines[side].set_visible(True)
+
+    # Mostrar mensaje centrado
     ax.text(
         0.5,
         0.5,
@@ -158,6 +162,7 @@ def _draw_empty_panel(ax):
 # ============================================================
 
 
+# Reemplazar la función plot_context_2x2 por esta versión
 def plot_context_2x2(
     dfs,
     var_principal,
@@ -168,9 +173,10 @@ def plot_context_2x2(
     folder_out=None,
     show=True,
     show_labels=True,
+    verbose=False,
 ):
 
-    fecha_obj = pd.to_datetime(fecha_obj)
+    fecha_obj = pd.to_datetime(fecha_obj).normalize()
     var_principal = var_principal.lower()
 
     variables = ["tmax", "tmean", "tmin", "pr"]
@@ -185,13 +191,57 @@ def plot_context_2x2(
     start = fecha_obj - pd.Timedelta(days=ventana)
     end = fecha_obj + pd.Timedelta(days=ventana)
 
+    # --------------------------------------------------------
+    # Calcular límites globales por tipo para asegurar ejes
+    # cuando un panel quede vacío en la ventana
+    # --------------------------------------------------------
+    global_limits = {}
+
+    # Temperaturas: combinar tmin,tmean,tmax si existen (usamos todo el df, no solo la ventana)
+    temps = []
+    for tv in ("tmin", "tmean", "tmax"):
+        dfv = dfs.get(tv)
+        if dfv is not None and not dfv.empty:
+            vals_all = pd.to_numeric(
+                dfv["valor"].replace(-99, np.nan), errors="coerce"
+            ).dropna()
+            if not vals_all.empty:
+                temps.extend(vals_all.tolist())
+    if temps:
+        global_vmin = float(np.nanmin(temps))
+        global_vmax = float(np.nanmax(temps))
+        rango = max(1.0, global_vmax - global_vmin)
+        margen = 0.2 * rango
+        global_limits["temp"] = (global_vmin - margen, global_vmax + margen)
+    else:
+        # fallback razonable para temperatura
+        global_limits["temp"] = (10.0, 35.0)
+
+    # Precipitación: buscar vmax global en pr si existe
+    pr_df = dfs.get("pr")
+    if pr_df is not None and not pr_df.empty:
+        pr_vals = pd.to_numeric(
+            pr_df["valor"].replace(-99, np.nan), errors="coerce"
+        ).dropna()
+        if not pr_vals.empty:
+            vmax_pr = float(np.nanmax(pr_vals))
+            ymax = vmax_pr + max(1.0, 0.15 * vmax_pr)
+            global_limits["pr"] = (0.0, ymax)
+        else:
+            global_limits["pr"] = (0.0, 1.0)
+    else:
+        global_limits["pr"] = (0.0, 1.0)
+
     # -----------------------------------
     # Determinar variables anómalas
     # -----------------------------------
     vars_anomalas = set()
 
     if tipo_inconsistencia == "estadistico":
-        vars_anomalas.add(var_principal)
+        if (
+            var_principal != "pr"
+        ):  # PR no se considera variable evaluable para estadística
+            vars_anomalas.add(var_principal)
 
     if tipo_inconsistencia:
         if "==tmin" in tipo_inconsistencia:
@@ -223,59 +273,117 @@ def plot_context_2x2(
 
         df = dfs.get(var)
         if df is None or df.empty:
+            # establecer ejes temporales y verticales coherentes
+            ax.set_xlim(start, end)
+            if var == "pr":
+                ymin, ymax = global_limits["pr"]
+                ax.set_ylim(ymin, ymax)
+            else:
+                ymin, ymax = global_limits["temp"]
+                ax.set_ylim(ymin, ymax)
             _draw_empty_panel(ax)
             continue
 
         d = df.copy()
-        d["fecha"] = pd.to_datetime(d["fecha"])
-        d = d.sort_values("fecha")
+        # Normalizar fecha a día (evita problemas por horas / tz)
+        d["fecha"] = pd.to_datetime(d["fecha"]).dt.normalize()
+        d = d.sort_values("fecha").reset_index(drop=True)
 
+        # Filtrar por ventana
         sub = d[(d["fecha"] >= start) & (d["fecha"] <= end)]
         if sub.empty:
+
+            # 1. Fijar límites de eje X
+            ax.set_xlim(start, end)
+
+            # 2. Fijar límites de eje Y según variable
+            if var == "pr":
+                ymin, ymax = global_limits["pr"]
+            else:
+                ymin, ymax = global_limits["temp"]
+
+            ax.set_ylim(ymin, ymax)
+
+            # 3. Aplicar SIEMPRE los mismos LOCATORS y FORMATTERS
+            #    Esto corrige las ETIQUETAS del eje horizontal
+            ax.xaxis.set_major_locator(locator)  # DayLocator()
+            ax.xaxis.set_major_formatter(formatter)  # "%d-%b"
+            ax.tick_params(axis="x", rotation=45)
+
+            # 4. Redibujar panel vacío sin modificar ejes ya fijados
             _draw_empty_panel(ax)
             continue
 
         fechas = sub["fecha"].values
-        valores = sub["valor"].astype(float).values
+        # asegurar numeric
+        valores = pd.to_numeric(sub["valor"], errors="coerce").astype(float).values
 
-        # Validos vs faltantes
+        # Validos vs faltantes: usar np.nan para -99
         vals = np.where(valores == -99, np.nan, valores)
-        mask_missing = valores == -99
+        mask_missing = np.isnan(vals)
 
         # -----------------------------------
-        # Límites de eje Y
+        # Proteger contra series vacías o sin valores válidos
+        # -----------------------------------
+        if np.all(np.isnan(vals)):
+            _draw_empty_panel(ax)
+            ax.set_title(f"{var.title()} (sin datos en ventana)", pad=14)
+            continue
+
+        # -----------------------------------
+        # Límites de eje Y (FIJAR ANTES DE DIBUJAR)
         # -----------------------------------
         if var == "pr":
             vmax = np.nanmax(vals)
-            ymax = vmax + max(1, 0.15 * vmax)
+            # Evitar NaN en caso extremo de que todas las lluvias sean -99
+            vmax = vmax if not np.isnan(vmax) else 1.0
+
+            # Margen superior como en la versión original (muy estable)
+            ymax = vmax + max(1.0, 0.15 * vmax)
+
+            # Margen inferior suave y estable (igual que antes)
             ymin = -0.1 * ymax
+
             ax.set_ylim(ymin, ymax)
+
         else:
             vmin = np.nanmin(vals)
             vmax = np.nanmax(vals)
-            rango = (vmax - vmin) if vmax > vmin else 1
-            margen = 0.2 * rango
+            if np.isnan(vmin) or np.isnan(vmax):
+                _draw_empty_panel(ax)
+                continue
+
+            rango = (vmax - vmin) if vmax > vmin else 1.0
+
+            # Margen proporcional (20%)
+            margen_prop = 0.2 * rango
+
+            # Margen mínimo absoluto para evitar compresión en rangos pequeños
+            margen_min = 1.0
+
+            margen = max(margen_prop, margen_min)
+
             ax.set_ylim(vmin - margen, vmax + margen)
 
         # -----------------------------------
         # Gráfica
         # -----------------------------------
-        col = COLOR_VAR[var]
+        col = COLOR_VAR.get(var, "#333333")
 
         if var == "pr":
-            ax.bar(fechas, vals, width=0.6, color=col, alpha=0.45)
-            ax.plot(fechas, vals, "-o", markersize=3, color="#5A9FFF", lw=1.0)
+            ax.bar(fechas, vals, width=0.6, alpha=0.45)
+            ax.plot(fechas, vals, "-o", markersize=3, lw=1.0)
         else:
             ax.plot(fechas, vals, "-o", markersize=3, lw=1.0, color=col)
 
         # -----------------------------------
-        # Faltantes -99 como círculos huecos
+        # Faltantes -99 como círculos huecos (dibujar después de fijar ylim)
         # -----------------------------------
         if np.any(mask_missing):
-            y_missing = np.full(mask_missing.sum(), ax.get_ylim()[0] + 0.05)
+            y0 = ax.get_ylim()[0] + 0.05 * (ax.get_ylim()[1] - ax.get_ylim()[0])
             ax.scatter(
                 fechas[mask_missing],
-                y_missing,
+                [y0] * mask_missing.sum(),
                 facecolors="none",
                 edgecolors="#D62728",
                 s=30,
@@ -364,16 +472,37 @@ def plot_context_2x2(
 
 def plot_comparison_qc(df_org, df_qc, var, periodo, estacion, folder_out):
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 7), dpi=110)
-
+    # Copias seguras
     df_org = df_org.copy()
     df_qc = df_qc.copy()
+
     df_org["fecha"] = pd.to_datetime(df_org["fecha"])
     df_qc["fecha"] = pd.to_datetime(df_qc["fecha"])
 
-    fechas = df_org["fecha"].values
-    vo = df_org["valor"].astype(float).replace(-99, np.nan).values
-    vq = df_qc["valor"].astype(float).replace(-99, np.nan).values
+    # ============================================================
+    # Alineación por fecha (outer merge para NO perder información)
+    # ============================================================
+    dfm = df_org.merge(df_qc, on="fecha", how="outer", suffixes=("_org", "_qc"))
+    dfm = dfm.sort_values("fecha").reset_index(drop=True)
+
+    # Convertir valores
+    dfm["valor_org"] = pd.to_numeric(dfm["valor_org"], errors="coerce")
+    dfm["valor_qc"] = pd.to_numeric(dfm["valor_qc"], errors="coerce")
+
+    fechas = dfm["fecha"].values
+    vo = dfm["valor_org"].astype(float).replace(-99, np.nan).values
+    vq = dfm["valor_qc"].astype(float).replace(-99, np.nan).values
+
+    # Para detectar modificados
+    mask_mod = ~np.isclose(vo, vq, equal_nan=True)
+
+    # Para detectar faltantes
+    mask_missing_qc = dfm["valor_qc"].isna() | (dfm["valor_qc"] == -99)
+
+    # ============================================================
+    # Gráficos
+    # ============================================================
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), dpi=110)
 
     locator = mdates.AutoDateLocator()
     formatter = mdates.ConciseDateFormatter(locator)
@@ -401,8 +530,7 @@ def plot_comparison_qc(df_org, df_qc, var, periodo, estacion, folder_out):
 
     ax2.plot(fechas, vq, "-", lw=0.8, color=COLOR_VAR.get(var, "blue"))
 
-    # Valores modificados
-    mask_mod = ~np.isclose(vo, vq, equal_nan=True)
+    # Marcar modificaciones
     if np.any(mask_mod):
         ax2.scatter(
             fechas[mask_mod],
@@ -416,21 +544,21 @@ def plot_comparison_qc(df_org, df_qc, var, periodo, estacion, folder_out):
             zorder=6,
         )
 
-    # Faltantes
-    mask_missing = df_qc["valor"] == -99
-    if np.any(mask_missing):
-        yvals = vq[~np.isnan(vq)]
-        if yvals.size > 0:
-            ymin = np.nanmin(yvals)
-            ymax = np.nanmax(yvals)
+    # Marcar faltantes
+    if np.any(mask_missing_qc):
+        # Para colocar faltantes un poco por debajo
+        vq_nonan = vq[~np.isnan(vq)]
+        if len(vq_nonan) > 0:
+            ymin = np.nanmin(vq_nonan)
+            ymax = np.nanmax(vq_nonan)
             rng = max(1, ymax - ymin)
-            y_offset = ymin - 0.1 * rng
+            y_offset = ymin - 0.08 * rng
         else:
             y_offset = -1
 
         ax2.scatter(
-            fechas[mask_missing],
-            [y_offset] * mask_missing.sum(),
+            fechas[mask_missing_qc],
+            [y_offset] * mask_missing_qc.sum(),
             s=50,
             marker="o",
             facecolors="none",
