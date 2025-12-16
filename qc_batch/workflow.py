@@ -258,6 +258,9 @@ def process_file(
     Procesa una variable para una estación específica.
     """
 
+    # Normalizar ID de estación (case-sensitive filesystem)
+    estacion = estacion.upper()
+
     if ask_user is None:
         ask_user = input
 
@@ -269,11 +272,17 @@ def process_file(
         return
 
     # Archivo base
-    base_info = find_candidate_file(folder_in, folder_out, var, periodo, estacion)
-    status = base_info["status"]
-    path_base = base_info["path"]
+    base_info = None
+    status = None
+    path_base = None
 
-    if status is None and start_from != "qc":
+    if start_from in ("auto", "qc"):
+        base_info = find_candidate_file(folder_in, folder_out, var, periodo, estacion)
+        status = base_info.get("status")
+        path_base = base_info.get("path")
+
+    # ⚠️ SOLO validar existencia en modo AUTO o QC
+    if start_from in ("auto", "qc") and status is None:
         print(f"No se encontró archivo para {var}_{periodo}_{estacion}")
         return
 
@@ -300,7 +309,10 @@ def process_file(
         print(f"[{var.upper()}] Revisión parcial usando QC: {path_base}")
 
     else:
-        print(f"[{var.upper()}] Archivo base detectado: {status.upper()} → {path_base}")
+        if status and path_base:
+            print(
+                f"[{var.upper()}] Archivo base detectado: {status.upper()} → {path_base}"
+            )
 
     # Registrar ruta real del archivo cargado para la variable principal
     paths_loaded[var] = str(path_base)
@@ -344,6 +356,14 @@ def process_file(
         # si no se pudo leer, crear df_org vacío con fechas del df_base si existe
         df_org = None
 
+    # ============================================================
+    # MODO FORZADO ORG: impedir cualquier detección automática
+    # ============================================================
+    if start_from == "org":
+        # El triplete YA fue cargado exclusivamente desde ORG.
+        # No se permite fallback a TMP ni QC en ningún punto.
+        pass
+
     # ------------------------------------------
     # Cargar triplete SOLO si no se cargó antes
     # ------------------------------------------
@@ -357,7 +377,7 @@ def process_file(
             pass
         else:
             dfs_trip, paths_trip = load_triplet(
-                folder_in, folder_out, periodo, estacion
+                folder_in, folder_out, periodo, estacion, force_org=False
             )
 
     # Registrar rutas reales para TMIN, TMEAN, TMAX y PR (usar paths_trip ya poblado)
@@ -614,7 +634,7 @@ def process_file(
             pass
 
         # Guardar TMP coherente después de *cada* corrección
-        write_triplet_tmp(dfs_trip, folder_out, periodo, estacion)
+        write_triplet_tmp(dfs_trip, paths_trip, folder_out, estacion)
         print(f"💾 TMP actualizado para {fecha_str}.")
 
         # 🔁 Recalcular inconsistencias con el triplete ACTUALIZADO
@@ -648,7 +668,7 @@ def process_file(
     # Si entramos en modo QC parcial (start_from == "qc") NO escribir tmp (dejamos QC como origen);
     # si entramos desde 'auto' o normal, sí escribimos tmp.
     if start_from != "qc":
-        write_triplet_tmp(dfs_trip, folder_out, periodo, estacion)
+        write_triplet_tmp(dfs_trip, paths_trip, folder_out, estacion)
     else:
         # aún así, si hubo modificaciones guardadas, escribir QC final después del bloque estadístico
         pass

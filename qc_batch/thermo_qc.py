@@ -15,6 +15,7 @@ from typing import Dict, Optional, List, Any
 import pandas as pd
 import json
 from datetime import datetime, timezone
+from qc_batch.io_manager import extract_period_from_filename
 
 # Intentamos usar io_manager existente
 try:
@@ -29,6 +30,24 @@ except Exception:
 
 CHANGES_FNAME = "changes_applied.json"
 COMPLETED_FNAME = "completed_series.json"
+
+
+def find_candidate_any_period(folder_out, var, estacion):
+    estacion = estacion.upper()
+    folder_out = Path(folder_out)
+
+    # Prioridad: QC → TMP
+    patrones = [
+        f"{var}_*_{estacion}_QC.csv",
+        f"{var}_*_{estacion}_tmp.csv",
+    ]
+
+    for patron in patrones:
+        matches = sorted(folder_out.glob(patron))
+        if matches:
+            return str(matches[0])
+
+    return None
 
 
 def _path_changes(folder_out: str) -> Path:
@@ -54,20 +73,24 @@ def _save_changes(folder_out: str, changes: Dict[str, Any]):
         json.dump(changes, fh, indent=2, ensure_ascii=False)
 
 
-def load_triplet(folder_in: str, folder_out: str, periodo: str, estacion: str):
+def load_triplet(
+    folder_in: str,
+    folder_out: str,
+    periodo: str,
+    estacion: str,
+    force_org: bool = False,
+):
     """
     Carga tmin, tmean, tmax y pr para la estación indicada.
 
-    Prioridad:
-        1) *_QC.csv    (folder_out)
-        2) *_tmp.csv   (folder_out)
-        3) *_org.csv   (folder_in)
-        4) fallback flexible (var_*_estacion*.csv)
-
-    Retorna:
-        dfs_trip  -> dict con DataFrames
-        paths_trip -> dict con rutas reales cargadas
+    Prioridad (modo AUTO):
+        1) *_QC.csv    (folder_out, cualquier periodo)
+        2) *_tmp.csv   (folder_out, cualquier periodo)
+        3) *_org.csv   (folder_in, periodo exacto)
+        4) fallback flexible (solo ORG)
     """
+
+    estacion = estacion.upper()
 
     res = {}
     paths_trip = {}
@@ -79,31 +102,47 @@ def load_triplet(folder_in: str, folder_out: str, periodo: str, estacion: str):
         df_loaded = None
         ruta_usada = "N/D"
 
-        # Intentar match exacto periodo + estación
-        cand = find_candidate_file(folder_in, folder_out, var, periodo, estacion)
-
-        if cand.get("path"):
-            ruta_usada = cand["path"]
-            try:
+        # ==================================================
+        # MODO FORZADO ORG (desde cero REAL)
+        # ==================================================
+        if force_org:
+            path = Path(folder_in) / build_filename(var, periodo, estacion, "org")
+            if path.exists():
+                ruta_usada = str(path)
                 df_loaded = read_series(ruta_usada)
-            except Exception:
-                df_loaded = None
 
-        # Si no se pudo cargar exacto → fallback flexible
-        if df_loaded is None:
+        # ==================================================
+        # MODO AUTO (incremental por estación)
+        # ==================================================
+        else:
+            # 1) Buscar QC/TMP ignorando periodo
+            path_any = find_candidate_any_period(folder_out, var, estacion)
 
-            pattern = f"{var}_*_{estacion}*.csv"
-            matches = list(Path(folder_in).glob(pattern))
+            if path_any:
+                ruta_usada = path_any
+                df_loaded = read_series(ruta_usada)
 
+            # 2) ORG exacto (fallback)
+            if df_loaded is None:
+                cand = find_candidate_file(
+                    folder_in, folder_out, var, periodo, estacion
+                )
+                if cand.get("path"):
+                    ruta_usada = cand["path"]
+                    df_loaded = read_series(ruta_usada)
+
+        # ==================================================
+        # Fallback flexible SOLO para ORG
+        # ==================================================
+        if df_loaded is None and not force_org:
+            pattern = f"{var}_*_{estacion}_org.csv"
+            matches = sorted(Path(folder_in).glob(pattern))
             if matches:
                 ruta_usada = str(matches[0])
-                try:
-                    df_loaded = read_series(ruta_usada)
-                    print(
-                        f"[FALLBACK] Usando archivo {matches[0].name} para {var.upper()} en estación {estacion}"
-                    )
-                except Exception:
-                    df_loaded = None
+                df_loaded = read_series(ruta_usada)
+                print(
+                    f"[FALLBACK] Usando archivo {matches[0].name} para {var.upper()} en estación {estacion}"
+                )
 
         res[var] = df_loaded
         paths_trip[var] = ruta_usada
@@ -448,12 +487,16 @@ from qc_batch.io_manager import (
 
 
 def write_triplet_tmp(
-    dfs: Dict[str, pd.DataFrame], folder_out: str, periodo: str, estacion: str
+    dfs: Dict[str, pd.DataFrame],
+    paths_trip: Dict[str, str],
+    folder_out: str,
+    estacion: str,
 ) -> Dict[str, str]:
     """
     Guarda los DataFrames tmin/tmean/tmax como *_tmp.csv en folder_out
-    reutilizando io_manager.write_tmp para garantizar formato consistente.
-    Retorna dict {var: ruta}
+    usando el período REAL de cada variable, inferido desde el archivo
+    que fue cargado originalmente (paths_trip).
+    Retorna dict {var: ruta_escrita}
     """
     paths = {}
     estacion_upper = estacion.upper()
@@ -463,16 +506,31 @@ def write_triplet_tmp(
         if df is None:
             continue
 
-        # Normalizar columnas esperadas en df: 'fecha' (datetime o YYYYMMDD) y 'valor'
+        src_path = paths_trip.get(var)
+        if not src_path:
+            raise ValueError(
+                f"No hay ruta fuente registrada para {var}; "
+                "no se puede determinar el período real."
+            )
+
+        periodo_real = extract_period_from_filename(src_path)
+        if not periodo_real:
+            raise ValueError(
+                f"No se pudo determinar el período real para {var} desde {src_path}"
+            )
+
         df_loc = df.copy()
-        # Si 'fecha' no está en formato datetime, intentar convertir; mantendremos 'fecha' como column needed by write_tmp
-        df_loc["fecha"] = pd.to_datetime(df_loc["fecha"], errors="coerce").dt.strftime(
-            "%Y%m%d"
-        )
+        df_loc["fecha"] = pd.to_datetime(df_loc["fecha"], errors="coerce")
         df_loc["valor"] = pd.to_numeric(df_loc["valor"], errors="coerce")
 
-        # Usar io_manager.write_tmp que escribirá FECHA,<ID_ESTACION>
-        path_written = write_tmp(df_loc, folder_out, var, periodo, estacion_upper)
+        path_written = write_tmp(
+            df_loc,
+            folder_out,
+            var,
+            periodo_real,
+            estacion_upper,
+        )
+
         paths[var] = path_written
 
     return paths

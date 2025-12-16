@@ -28,6 +28,28 @@ import pandas as pd
 # ---------------------------------------------------------------------
 # Buscar archivos *_org.csv en la carpeta de entrada
 # ---------------------------------------------------------------------
+def existe_estado_triplete(folder_out, estacion):
+    from pathlib import Path
+
+    estacion = estacion.upper()
+    folder_out = Path(folder_out)
+
+    patrones = [
+        f"tmin_*_{estacion}_tmp.csv",
+        f"tmean_*_{estacion}_tmp.csv",
+        f"tmax_*_{estacion}_tmp.csv",
+        f"tmin_*_{estacion}_QC.csv",
+        f"tmean_*_{estacion}_QC.csv",
+        f"tmax_*_{estacion}_QC.csv",
+    ]
+
+    for patron in patrones:
+        if list(folder_out.glob(patron)):
+            return True
+
+    return False
+
+
 def buscar_archivos_org(folder_in: str):
     folder = Path(folder_in)
     archivos = []
@@ -45,6 +67,8 @@ def buscar_archivos_org(folder_in: str):
                 "var": info["var"],
                 "periodo": info["periodo"],
                 "estacion": info["estacion"],
+                "estacion": info["estacion"].upper(),
+                "periodo": info["periodo"].strip(),
             }
         )
     return archivos
@@ -210,14 +234,30 @@ def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
             return
 
     if accion == "n":
-        # Procesar desde cero: ignorar tmp o qc
-        print(f"🔄 Procesando desde cero: {entry['path'].name}\n")
+        hay_estado = existe_estado_triplete(folder_out, estacion)
+
+        start_mode = "auto" if hay_estado else "org"
+
+        # ===================== LOG CLAVE =====================
+        print(
+            f"[BATCH] Estación {estacion} | Periodo {periodo} | "
+            f"Estado previo: {'SI' if hay_estado else 'NO'} | "
+            f"Modo de carga: {start_mode.upper()}"
+        )
+        # =====================================================
+
+        print(
+            f"🔄 Procesando {'con estado previo' if hay_estado else 'desde ORG limpio'}: "
+            f"{entry['path'].name}\n"
+        )
+
         process_file(
             var=var,
             periodo=periodo,
             estacion=estacion,
             folder_in=folder_in,
             folder_out=folder_out,
+            start_from=start_mode,
             lower_p=lower_p,
             upper_p=upper_p,
             k=k,
@@ -244,7 +284,7 @@ def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
             estacion=estacion,
             folder_in=folder_in,
             folder_out=folder_out,
-            start_from="org",
+            start_from="auto",
             lower_p=lower_p,
             upper_p=upper_p,
             k=k,

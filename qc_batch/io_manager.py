@@ -24,6 +24,12 @@ FNAME_RE = re.compile(
 )
 
 
+def extract_period_from_filename(path):
+    name = Path(path).name
+    m = re.search(r"_(\d{4}-\d{4})_", name)
+    return m.group(1) if m else None
+
+
 def parse_filename(fname: str) -> Optional[Dict[str, str]]:
     """Parsea nombre de archivo y devuelve dict con var, periodo, estacion, suffix (org/tmp/qc o None)"""
     m = FNAME_RE.match(Path(fname).name)
