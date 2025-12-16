@@ -1,4 +1,5 @@
 *.txt
+*.zip
 __pycache__/
 *bak*
 tests/
