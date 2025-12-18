@@ -234,22 +234,21 @@ def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
             return
 
     if accion == "n":
-        hay_estado = existe_estado_triplete(folder_out, estacion)
+        # hay_estado = existe_estado_triplete(folder_out, estacion)
 
-        start_mode = "auto" if hay_estado else "org"
+        # start_mode = "auto" if hay_estado else "org"
 
         # ===================== LOG CLAVE =====================
         print(
             f"[BATCH] Estación {estacion} | Periodo {periodo} | "
-            f"Estado previo: {'SI' if hay_estado else 'NO'} | "
-            f"Modo de carga: {start_mode.upper()}"
+            "Acción usuario: DESDE CERO → forzando ORG"
         )
         # =====================================================
 
-        print(
-            f"🔄 Procesando {'con estado previo' if hay_estado else 'desde ORG limpio'}: "
-            f"{entry['path'].name}\n"
-        )
+        # print(
+        #     f"🔄 Procesando {'con estado previo' if hay_estado else 'desde ORG limpio'}: "
+        #     f"{entry['path'].name}\n"
+        # )
 
         process_file(
             var=var,
@@ -257,7 +256,7 @@ def procesar_archivo(entry, folder_in, folder_out, ventana, lower_p, upper_p, k)
             estacion=estacion,
             folder_in=folder_in,
             folder_out=folder_out,
-            start_from=start_mode,
+            start_from="org",
             lower_p=lower_p,
             upper_p=upper_p,
             k=k,
