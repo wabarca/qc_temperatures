@@ -326,8 +326,25 @@ def plot_context_2x2(
         # Proteger contra series vacías o sin valores válidos
         # -----------------------------------
         if np.all(np.isnan(vals)):
+
+            # 1. Fijar eje X coherente
+            ax.set_xlim(start, end)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+            ax.tick_params(axis="x", rotation=45)
+
+            # 2. Fijar eje Y coherente
+            if var == "pr":
+                ymin, ymax = global_limits["pr"]
+            else:
+                ymin, ymax = global_limits["temp"]
+
+            ax.set_ylim(ymin, ymax)
+
+            # 3. Dibujar panel vacío respetando ejes
             _draw_empty_panel(ax)
             ax.set_title(f"{var.title()} (sin datos en ventana)", pad=14)
+
             continue
 
         # -----------------------------------

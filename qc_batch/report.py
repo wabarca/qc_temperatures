@@ -44,30 +44,61 @@ def _pagina_portada(pdf, var, periodo, estacion):
 # ---------------------------------------------------------------------
 # Tabla de cambios
 # ---------------------------------------------------------------------
-def _pagina_tabla_cambios(pdf, df_changes):
-    fig, ax = plt.subplots(figsize=(8.5, 11))
-    ax.axis("off")
-
-    ax.set_title("Resumen de cambios aplicados", fontsize=16, fontweight="bold", pad=20)
-
-    # Mostrar solo si hay contenido
+def _pagina_tabla_cambios(pdf, df_changes, filas_por_pagina=35):
+    """
+    Genera una o varias páginas con la tabla de cambios,
+    dividiendo el contenido si es muy largo.
+    """
     if df_changes.empty:
-        ax.text(
-            0.5, 0.5, "No se aplicaron cambios.", ha="center", va="center", fontsize=14
+        fig, ax = plt.subplots(figsize=(8.5, 11))
+        ax.axis("off")
+        ax.set_title(
+            "Resumen de cambios aplicados",
+            fontsize=16,
+            fontweight="bold",
+            pad=20,
         )
-    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No se aplicaron cambios.",
+            ha="center",
+            va="center",
+            fontsize=14,
+        )
+        pdf.savefig(fig)
+        plt.close(fig)
+        return
+
+    # Dividir DataFrame en bloques
+    n = len(df_changes)
+    bloques = [
+        df_changes.iloc[i : i + filas_por_pagina] for i in range(0, n, filas_por_pagina)
+    ]
+
+    for idx, bloque in enumerate(bloques, start=1):
+        fig, ax = plt.subplots(figsize=(8.5, 11))
+        ax.axis("off")
+
+        titulo = "Resumen de cambios aplicados"
+        if len(bloques) > 1:
+            titulo += f" (página {idx} de {len(bloques)})"
+
+        ax.set_title(titulo, fontsize=16, fontweight="bold", pad=20)
+
         tabla = ax.table(
-            cellText=df_changes.values,
-            colLabels=df_changes.columns,
+            cellText=bloque.values,
+            colLabels=bloque.columns,
             loc="center",
             cellLoc="center",
         )
-        tabla.auto_set_font_size(False)
-        tabla.set_fontsize(10)
-        tabla.scale(1.1, 1.3)
 
-    pdf.savefig(fig)
-    plt.close(fig)
+        tabla.auto_set_font_size(False)
+        tabla.set_fontsize(9)
+        tabla.scale(1.1, 1.2)
+
+        pdf.savefig(fig)
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------
@@ -186,7 +217,7 @@ def generar_informe_pdf(
 
     with PdfPages(output_path) as pdf:
         _pagina_portada(pdf, var, periodo, estacion)
-        _pagina_tabla_cambios(pdf, df_changes)
+        _pagina_tabla_cambios(pdf, df_changes, filas_por_pagina=25)
         _pagina_grafica_comparativa(pdf, png_path)
         _pagina_estadisticas(pdf, df_changes)
         _paginas_contexto(pdf, folder_out, var, periodo, estacion, df_changes)
