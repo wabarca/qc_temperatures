@@ -11,6 +11,8 @@ Módulo estadístico para:
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
+import json
+from pathlib import Path
 
 
 def compute_bounds(
@@ -60,29 +62,78 @@ def compute_bounds(
     }
 
 
+def get_validated_outliers(folder_out):
+    """
+    Retorna conjunto de fechas validadas por el usuario (accion == 'm'),
+    indexadas SOLO por estación y fecha.
+    """
+    try:
+        data = json.loads(
+            Path(folder_out, "changes_applied.json").read_text(encoding="utf-8")
+        )
+
+        return {
+            (entry.get("estacion"), entry.get("fecha"))
+            for entry in data.get("single_changes", [])
+            if entry.get("accion") == "m"
+            and entry.get("estacion") is not None
+            and entry.get("fecha") is not None
+        }
+    except Exception:
+        return set()
+
+
 def detect_outliers(
-    df: pd.DataFrame, bounds: Dict[str, float], col_val: str = "valor"
+    df: pd.DataFrame,
+    bounds: Dict[str, float],
+    folder_out: str,
+    estacion: str,
+    variable: str,
+    col_val: str = "valor",
 ) -> List[Tuple[int, float]]:
     """
-    Detecta outliers en un DataFrame que debe tener columna 'valor'.
+    Detecta outliers estadísticos en un DataFrame.
 
-    Retorna lista de tuplas:
-      [(indice, valor), ...]
-
-    Solo detecta outliers donde valor != -99.
+    Un outlier previamente validado (accion == 'm') para la misma
+    estación, variable y fecha NO vuelve a detectarse.
     """
+
+    if df is None or df.empty or col_val not in df.columns:
+        return []
 
     lim_inf = bounds.get("lim_inf")
     lim_sup = bounds.get("lim_sup")
 
-    if np.isnan(lim_inf) or np.isnan(lim_sup):
+    # Validación básica de límites
+    if lim_inf is None or lim_sup is None:
         return []
+
+    if not np.isfinite(lim_inf) or not np.isfinite(lim_sup):
+        return []
+
+    # Rango degenerado → no detectar
+    if (lim_sup - lim_inf) <= 1e-6:
+        return []
+
+    validated = get_validated_outliers(folder_out)
 
     outliers = []
 
     for i, v in enumerate(df[col_val]):
         if v == -99:
             continue
+
+        fecha = df.loc[i, "fecha"]
+        if pd.isna(fecha):
+            continue
+
+        fecha_str = pd.to_datetime(fecha).strftime("%Y-%m-%d")
+        key = (estacion, fecha_str)
+
+        # 🔒 Outlier ya validado
+        if key in validated:
+            continue
+
         if v < lim_inf or v > lim_sup:
             outliers.append((i, float(v)))
 

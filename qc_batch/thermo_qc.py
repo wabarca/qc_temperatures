@@ -39,7 +39,9 @@ def find_candidate_any_period(folder_out, var, estacion):
     # Prioridad: QC → TMP
     patrones = [
         f"{var}_*_{estacion}_QC.csv",
+        f"{var}_*_{estacion}_qc.csv",
         f"{var}_*_{estacion}_tmp.csv",
+        f"{var}_*_{estacion}_TMP.csv",
     ]
 
     for patron in patrones:
@@ -78,6 +80,7 @@ def load_triplet(
     folder_out: str,
     periodo: str,
     estacion: str,
+    start_from: str = "auto",
     force_org: bool = False,
 ):
     """
@@ -98,9 +101,22 @@ def load_triplet(
     variables = ["tmin", "tmean", "tmax", "pr"]
 
     for var in variables:
+        # PR siempre se carga desde ORG
+        if var == "pr":
+            # PR se usa solo como referencia: cargar ORG ignorando periodo
+            pattern = f"pr_*_{estacion}_org.csv"
+            matches = sorted(Path(folder_in).glob(pattern))
 
-        df_loaded = None
-        ruta_usada = "N/D"
+            if matches:
+                ruta_usada = str(matches[0])
+                df_loaded = read_series(ruta_usada)
+            else:
+                ruta_usada = "N/D"
+                df_loaded = None
+
+            res[var] = df_loaded
+            paths_trip[var] = ruta_usada
+            continue
 
         # ==================================================
         # MODO FORZADO ORG (desde cero REAL)
@@ -115,26 +131,44 @@ def load_triplet(
         # MODO AUTO (incremental por estación)
         # ==================================================
         else:
-            # 1) Buscar QC/TMP ignorando periodo
-            path_any = find_candidate_any_period(folder_out, var, estacion)
 
-            if path_any:
-                ruta_usada = path_any
-                df_loaded = read_series(ruta_usada)
+            # ==================================================
+            # MODO QC (revisión parcial)
+            # ==================================================
+            if start_from == "qc":
+                path_any = find_candidate_any_period(folder_out, var, estacion)
 
-            # 2) ORG exacto (fallback)
-            if df_loaded is None:
-                cand = find_candidate_file(
-                    folder_in, folder_out, var, periodo, estacion
-                )
-                if cand.get("path"):
-                    ruta_usada = cand["path"]
+                if path_any and path_any.lower().endswith("_qc.csv"):
+                    ruta_usada = path_any
                     df_loaded = read_series(ruta_usada)
+                else:
+                    raise FileNotFoundError(
+                        f"[QC] No se encontró archivo QC para {var.upper()} en estación {estacion}"
+                    )
+
+            # ==================================================
+            # MODO AUTO (incremental)
+            # ==================================================
+            else:
+                path_any = find_candidate_any_period(folder_out, var, estacion)
+
+                if path_any:
+                    ruta_usada = path_any
+                    df_loaded = read_series(ruta_usada)
+
+                # fallback ORG exacto
+                if df_loaded is None:
+                    cand = find_candidate_file(
+                        folder_in, folder_out, var, periodo, estacion
+                    )
+                    if cand.get("path"):
+                        ruta_usada = cand["path"]
+                        df_loaded = read_series(ruta_usada)
 
         # ==================================================
         # Fallback flexible SOLO para ORG
         # ==================================================
-        if df_loaded is None and not force_org:
+        if df_loaded is None and not force_org and start_from != "qc":
             pattern = f"{var}_*_{estacion}_org.csv"
             matches = sorted(Path(folder_in).glob(pattern))
             if matches:

@@ -24,6 +24,44 @@ FNAME_RE = re.compile(
 )
 
 
+def register_outlier_validation(
+    folder_out: str,
+    estacion: str,
+    variable: str,
+    fecha: str,
+    valor_original: float,
+    accion: str = "m",
+    nota: str = "",
+):
+    """
+    Registra explícitamente la decisión del analista sobre un outlier estadístico.
+    """
+    path = Path(folder_out) / "changes_applied.json"
+
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        data = {"single_changes": []}
+
+    data["single_changes"].append(
+        {
+            "tipo": "outlier",
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "estacion": estacion.upper(),
+            "variable": variable.lower(),
+            "fecha": fecha,
+            "valor_original": float(valor_original),
+            "accion": accion,
+            "nota": nota,
+        }
+    )
+
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def extract_period_from_filename(path):
     name = Path(path).name
     m = re.search(r"_(\d{4}-\d{4})_", name)

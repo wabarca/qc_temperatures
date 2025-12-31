@@ -102,40 +102,42 @@ def sugerir_accion_outlier(valor, p_low, p_high, iqr):
 # ============================================================
 
 
-def _load_triplet_from_qc(folder_out, folder_in, periodo, estacion):
+def _load_triplet_from_qc(folder_out, folder_in, estacion):
+    """
+    Carga triplete priorizando:
+      1) QC (cualquier periodo)
+      2) TMP (cualquier periodo)
+      3) ORG (cualquier periodo)
+    """
     estacion = estacion.upper()
     vars_all = ["tmin", "tmean", "tmax", "pr"]
+
     result = {}
     paths_trip = {}
 
     for var in vars_all:
-        path_qc = Path(folder_out) / build_filename(var, periodo, estacion, "qc")
-        path_tmp = Path(folder_out) / build_filename(var, periodo, estacion, "tmp")
-        path_org = Path(folder_in) / build_filename(var, periodo, estacion, "org")
-
         df = None
         origen = "N/D"
 
-        if path_qc.exists():
-            try:
-                df = read_series(str(path_qc))
-                origen = str(path_qc)
-            except:
-                df = None
+        # 1️⃣ QC – cualquier periodo
+        qc_matches = sorted(Path(folder_out).glob(f"{var}_*_{estacion}_QC.csv"))
+        if qc_matches:
+            df = read_series(str(qc_matches[0]))
+            origen = str(qc_matches[0])
 
-        if df is None and path_tmp.exists():
-            try:
-                df = read_series(str(path_tmp))
-                origen = str(path_tmp)
-            except:
-                df = None
+        # 2️⃣ TMP – cualquier periodo
+        if df is None:
+            tmp_matches = sorted(Path(folder_out).glob(f"{var}_*_{estacion}_tmp.csv"))
+            if tmp_matches:
+                df = read_series(str(tmp_matches[0]))
+                origen = str(tmp_matches[0])
 
-        if df is None and path_org.exists():
-            try:
-                df = read_series(str(path_org))
-                origen = str(path_org)
-            except:
-                df = None
+        # 3️⃣ ORG – cualquier periodo
+        if df is None:
+            org_matches = sorted(Path(folder_in).glob(f"{var}_*_{estacion}_org.csv"))
+            if org_matches:
+                df = read_series(str(org_matches[0]))
+                origen = str(org_matches[0])
 
         result[var] = df
         paths_trip[var] = origen
@@ -368,16 +370,26 @@ def process_file(
     # Cargar triplete SOLO si no se cargó antes
     # ------------------------------------------
     if not triplet_loaded:
+        # ============================================================
+        # CARGA FORZADA DEL TRIPLETE EN REVISIÓN PARCIAL
+        # ============================================================
         if start_from == "qc":
             dfs_trip, paths_trip = _load_triplet_from_qc(
-                folder_out, folder_in, periodo, estacion
+                folder_out, folder_in, estacion
             )
+            triplet_loaded = True
+
         elif start_from == "org":
             # Ya fue cargado antes → NO recargar
             pass
         else:
             dfs_trip, paths_trip = load_triplet(
-                folder_in, folder_out, periodo, estacion, force_org=False
+                folder_in,
+                folder_out,
+                periodo,
+                estacion,
+                start_from=start_from,
+                force_org=False,
             )
 
     # Registrar rutas reales para TMIN, TMEAN, TMAX y PR (usar paths_trip ya poblado)
@@ -717,7 +729,13 @@ def process_file(
             bounds = compute_bounds(serie_valida, lower_p=lower_p, upper_p=upper_p, k=k)
 
             # Detectar outliers
-            outliers = detect_outliers(df_base, bounds)
+            outliers = detect_outliers(
+                df_base,
+                bounds,
+                folder_out,
+                estacion,
+                variable=var,
+            )
             total_outliers = len(outliers)
             resumen_outliers = []
 
@@ -1008,7 +1026,13 @@ def auditar_qc(
     if df_qc is not None:
         serie_valida = df_qc[df_qc["valor"] != -99]["valor"]
         bounds = compute_bounds(serie_valida, lower_p=lower_p, upper_p=upper_p, k=k)
-        estat = detect_outliers(df_qc, bounds)
+        estat = detect_outliers(
+            df_qc,
+            bounds,
+            folder_out=folder_out,
+            estacion=estacion,
+            variable=var,
+        )
         estad_report["bounds"] = bounds
         # load changes to detect maintained
         try:
@@ -1068,6 +1092,7 @@ def auditar_qc(
                 k=k,
                 ventana=7,
                 ask_user=input,
+                start_from="qc",
             )
     else:
         print("🎉 QC APROBADO: No se encontraron inconsistencias no validadas.")

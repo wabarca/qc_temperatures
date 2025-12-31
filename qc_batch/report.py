@@ -217,7 +217,7 @@ def generar_informe_pdf(
 
     with PdfPages(output_path) as pdf:
         _pagina_portada(pdf, var, periodo, estacion)
-        _pagina_tabla_cambios(pdf, df_changes, filas_por_pagina=25)
+        _pagina_tabla_cambios(pdf, df_changes, filas_por_pagina=40)
         _pagina_grafica_comparativa(pdf, png_path)
         _pagina_estadisticas(pdf, df_changes)
         _paginas_contexto(pdf, folder_out, var, periodo, estacion, df_changes)
